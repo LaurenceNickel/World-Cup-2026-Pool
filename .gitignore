@@ -1,0 +1,38 @@
+# Python/runtime
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Notebooks/IDE
+.ipynb_checkpoints/
+.jupyter/
+.idea/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+.streamlit/secrets.example.toml
+GOOGLE_SHEETS_SETUP.md
+
+# Google service-account credentials. Keep .streamlit/secrets.example.toml committed.
+*service-account*.json
+*service_account*.json
+*credentials*.json
+gcp-*.json
+google-*.json
+
+# Local mutable state when Google Sheets is the production backend.
+data/predictions/
+data/drafts/
+data/standings/
+data/users.csv
+data/results.csv
+data/leaderboard.csv
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.streamlit/secrets.example.toml
+GOOGLE_SHEETS_SETUP.md

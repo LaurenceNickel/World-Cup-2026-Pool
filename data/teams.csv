@@ -1,0 +1,49 @@
+team_id,team_name,group,world_cup_ranking,logo_link
+T01,Mexico,A,15,logos/Mexico.png
+T02,South Africa,A,60,logos/South_Africa.png
+T03,South Korea,A,25,logos/South_Korea.png
+T04,Czechia,A,41,logos/Czechia.png
+T05,Canada,B,30,logos/Canada.png
+T06,Bosnia and Herzegovina,B,65,logos/Bosnia_and_Herzegovina.png
+T07,Qatar,B,55,logos/Qatar.png
+T08,Switzerland,B,19,logos/Switzerland.png
+T09,Brazil,C,6,logos/Brazil.png
+T10,Morocco,C,8,logos/Morocco.png
+T11,Haiti,C,83,logos/Haiti.png
+T12,Scotland,C,43,logos/Scotland.png
+T13,United States,D,16,logos/United_States.png
+T14,Paraguay,D,40,logos/Paraguay.png
+T15,Australia,D,27,logos/Australia.png
+T16,Türkiye,D,22,logos/Türkiye.png
+T17,Germany,E,10,logos/Germany.png
+T18,Curaçao,E,82,logos/Curaçao.png
+T19,Ivory Coast,E,34,logos/Ivory_Coast.png
+T20,Ecuador,E,23,logos/Ecuador.png
+T21,Netherlands,F,7,logos/Netherlands.png
+T22,Japan,F,18,logos/Japan.png
+T23,Sweden,F,38,logos/Sweden.png
+T24,Tunisia,F,44,logos/Tunisia.png
+T25,Belgium,G,9,logos/Belgium.png
+T26,Egypt,G,29,logos/Egypt.png
+T27,Iran,G,21,logos/Iran.png
+T28,New Zealand,G,85,logos/New_Zealand.png
+T29,Spain,H,2,logos/Spain.png
+T30,Cabo Verde,H,69,logos/Cabo_Verde.png
+T31,Saudi Arabia,H,61,logos/Saudi_Arabia.png
+T32,Uruguay,H,17,logos/Uruguay.png
+T33,France,I,1,logos/France.png
+T34,Senegal,I,14,logos/Senegal.png
+T35,Iraq,I,57,logos/Iraq.png
+T36,Norway,I,31,logos/Norway.png
+T37,Argentina,J,3,logos/Argentina.png
+T38,Algeria,J,28,logos/Algeria.png
+T39,Austria,J,24,logos/Austria.png
+T40,Jordan,J,63,logos/Jordan.png
+T41,Portugal,K,5,logos/Portugal.png
+T42,DR Congo,K,46,logos/DR_Congo.png
+T43,Uzbekistan,K,50,logos/Uzbekistan.png
+T44,Colombia,K,13,logos/Colombia.png
+T45,England,L,4,logos/England.png
+T46,Croatia,L,11,logos/Croatia.png
+T47,Ghana,L,74,logos/Ghana.png
+T48,Panama,L,33,logos/Panama.png
