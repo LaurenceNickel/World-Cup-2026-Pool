@@ -104,6 +104,29 @@ DEFAULT_THEME = {
     "border": "#d7e1ea",
 }
 
+TIMELINE_COLORS = [
+    "#4e79a7",
+    "#a0cbe8",
+    "#f28e2b",
+    "#ffbe7d",
+    "#59a14f",
+    "#8cd17d",
+    "#b6992d",
+    "#f1ce63",
+    "#499894",
+    "#86bcb6",
+    "#e15759",
+    "#ff9d9a",
+    "#79706e",
+    "#bab0ac",
+    "#d37295",
+    "#fabfd2",
+    "#b07aa1",
+    "#d4a6c8",
+    "#9d7660",
+    "#d7b5a6",
+]
+
 
 def ensure_csv_columns(path: Path, columns: list[str]) -> None:
     if not path.exists():
@@ -678,6 +701,7 @@ def apply_visual_theme() -> None:
             text-align: left;
         }
 
+        .leaderboard-table th.bold,
         .leaderboard-table td.bold {
             font-weight: 800;
         }
@@ -3264,7 +3288,12 @@ def render_centered_dataframe(
     bold_lookup = {column.lower() for column in (bold_columns or set())}
     headers = []
     for column in table.columns:
-        class_attr = ' class="left"' if is_left_aligned_column(str(column), left_columns) else ""
+        classes = []
+        if is_left_aligned_column(str(column), left_columns):
+            classes.append("left")
+        if str(column).lower() in bold_lookup:
+            classes.append("bold")
+        class_attr = f' class="{" ".join(classes)}"' if classes else ""
         headers.append(f"<th{class_attr}>{html.escape(str(column))}</th>")
 
     body_rows = []
@@ -3431,6 +3460,50 @@ def render_padded_bar_chart(table: pd.DataFrame, x: str, y: str) -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
 
+def render_chart_with_scrollable_legend(
+    chart: alt.Chart,
+    labels: list[str],
+    color_domain: list[str],
+    participant_types: dict[str, str],
+) -> None:
+    color_by_label = {
+        label: TIMELINE_COLORS[index % len(TIMELINE_COLORS)]
+        for index, label in enumerate(color_domain)
+    }
+    legend_items = []
+    for label in labels:
+        color = color_by_label[label]
+        if participant_types.get(label) == "AI":
+            marker = (
+                '<span style="width:0;height:0;border-left:0.42rem solid transparent;'
+                'border-right:0.42rem solid transparent;'
+                f'border-bottom:0.75rem solid {color};flex:0 0 auto;"></span>'
+            )
+        else:
+            marker = (
+                f'<span style="width:0.75rem;height:0.75rem;border-radius:50%;'
+                f'background:{color};flex:0 0 auto;"></span>'
+            )
+        legend_items.append(
+            '<div style="display:flex;align-items:center;gap:0.45rem;margin:0.35rem 0;">'
+            f"{marker}<span>{html.escape(label)}</span></div>"
+        )
+    legend_html = "".join(legend_items)
+    chart_col, legend_col = st.columns([0.86, 0.14], gap="small")
+    with chart_col:
+        st.altair_chart(chart, width="stretch")
+    with legend_col:
+        st.markdown(
+            (
+                '<div style="height:330px;display:flex;align-items:center;">'
+                '<div style="width:100%;max-height:240px;overflow-y:auto;'
+                'padding-right:0.35rem;color:#5b6d7d;">'
+                f"{legend_html}</div></div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+
 def render_padded_line_chart(
     table: pd.DataFrame,
     x: str,
@@ -3438,7 +3511,21 @@ def render_padded_line_chart(
     color: str,
     reverse_y: bool = False,
     y_values: list[int] | None = None,
+    color_domain: list[str] | None = None,
 ) -> None:
+    labels = sorted(table[color].dropna().astype(str).unique(), key=str.lower)
+    participant_types = (
+        table[[color, "Participant type"]]
+        .drop_duplicates(subset=[color])
+        .set_index(color)["Participant type"]
+        .astype(str)
+        .to_dict()
+    )
+    color_domain = color_domain or labels
+    color_range = [
+        TIMELINE_COLORS[index % len(TIMELINE_COLORS)]
+        for index in range(len(color_domain))
+    ]
     if reverse_y and y_values:
         y_scale = alt.Scale(domain=[max(y_values), min(y_values)], nice=False)
     elif reverse_y:
@@ -3446,15 +3533,24 @@ def render_padded_line_chart(
     else:
         y_scale = alt.Scale()
     y_axis = alt.Axis(values=y_values, format="d") if y_values else alt.Axis()
+    base = alt.Chart(table).encode(
+        x=alt.X(f"{x}:N", title=x, sort=None),
+        y=alt.Y(f"{y}:Q", title=y, scale=y_scale, axis=y_axis),
+        color=alt.Color(
+            f"{color}:N",
+            legend=None,
+            scale=alt.Scale(domain=color_domain, range=color_range),
+        ),
+        tooltip=[x, y, color, "Participant type"],
+    )
     chart = (
-        alt.Chart(table)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X(f"{x}:N", title=x, sort=None),
-            y=alt.Y(f"{y}:Q", title=y, scale=y_scale, axis=y_axis),
-            color=alt.Color(f"{color}:N", title=None),
-            tooltip=[x, y, color],
-        )
+        (base.mark_line() + base.mark_point(size=65).encode(
+            shape=alt.Shape(
+                "Participant type:N",
+                legend=None,
+                scale=alt.Scale(domain=["Human", "AI"], range=["circle", "triangle-up"]),
+            )
+        ))
         .properties(height=330)
         .configure_view(strokeWidth=0)
         .configure_axis(labelColor=DEFAULT_THEME["primary"], titleColor=DEFAULT_THEME["primary"], tickColor=DEFAULT_THEME["primary"], domainColor=DEFAULT_THEME["primary"])
@@ -3463,19 +3559,31 @@ def render_padded_line_chart(
     )
     with st.container():
         st.markdown('<div class="figure-pad">', unsafe_allow_html=True)
-        st.altair_chart(chart, width="stretch")
+        render_chart_with_scrollable_legend(chart, labels, color_domain, participant_types)
         st.markdown("</div>", unsafe_allow_html=True)
 
 
-def render_top_five_over_time_chart(table: pd.DataFrame) -> None:
+def render_top_five_over_time_chart(table: pd.DataFrame, color_domain: list[str]) -> None:
     if table.empty:
         return
     top_five = table[table["Rank"] <= 5].copy()
     if top_five.empty:
         return
+    labels = sorted(top_five["User name"].dropna().astype(str).unique(), key=str.lower)
+    participant_types = (
+        top_five[["User name", "Participant type"]]
+        .drop_duplicates(subset=["User name"])
+        .set_index("User name")["Participant type"]
+        .astype(str)
+        .to_dict()
+    )
+    color_range = [
+        TIMELINE_COLORS[index % len(TIMELINE_COLORS)]
+        for index in range(len(color_domain))
+    ]
     chart = (
         alt.Chart(top_five)
-        .mark_circle(size=95)
+        .mark_point(size=95)
         .encode(
             x=alt.X("Match:N", title="Match", sort=None),
             y=alt.Y(
@@ -3484,9 +3592,18 @@ def render_top_five_over_time_chart(table: pd.DataFrame) -> None:
                 scale=alt.Scale(domain=[5, 1], nice=False),
                 axis=alt.Axis(values=[1, 2, 3, 4, 5], format="d"),
             ),
-            color=alt.Color("User name:N", title=None),
+            color=alt.Color(
+                "User name:N",
+                legend=None,
+                scale=alt.Scale(domain=color_domain, range=color_range),
+            ),
+            shape=alt.Shape(
+                "Participant type:N",
+                legend=None,
+                scale=alt.Scale(domain=["Human", "AI"], range=["circle", "triangle-up"]),
+            ),
             size=alt.Size("Points:Q", title="Points", legend=alt.Legend(title="Points")),
-            tooltip=["Match", "User name", "Points", "Rank"],
+            tooltip=["Match", "User name", "Participant type", "Points", "Rank"],
         )
         .properties(height=330)
         .configure_view(strokeWidth=0)
@@ -3496,7 +3613,7 @@ def render_top_five_over_time_chart(table: pd.DataFrame) -> None:
     )
     with st.container():
         st.markdown('<div class="figure-pad">', unsafe_allow_html=True)
-        st.altair_chart(chart, width="stretch")
+        render_chart_with_scrollable_legend(chart, labels, color_domain, participant_types)
         st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -3551,7 +3668,10 @@ def render_additional_rankings(
 
     st.subheader("Most Correct Winners")
     winners = add_rank(snapshot[["user_name", "correct_winners"]].rename(columns={"correct_winners": "Correct winners"}), "Correct winners")
-    render_centered_dataframe(winners.rename(columns={"rank": "Rank", "user_name": "User name"}))
+    render_centered_dataframe(
+        winners.rename(columns={"rank": "Rank", "user_name": "User name"}),
+        bold_columns={"Correct winners"},
+    )
 
     st.subheader("Most Exact Score Components")
     components = add_rank(
@@ -3564,17 +3684,29 @@ def render_additional_rankings(
         ),
         "Total exact goal components",
     )
-    render_centered_dataframe(components.rename(columns={"rank": "Rank", "user_name": "User name"}))
+    render_centered_dataframe(
+        components.rename(columns={"rank": "Rank", "user_name": "User name"}),
+        bold_columns={"Total exact goal components"},
+    )
 
     st.subheader("Most Exact Scores")
     exact = add_rank(snapshot[["user_name", "exact_scores"]].rename(columns={"exact_scores": "Exact scores"}), "Exact scores")
-    render_centered_dataframe(exact.rename(columns={"rank": "Rank", "user_name": "User name"}))
+    render_centered_dataframe(
+        exact.rename(columns={"rank": "Rank", "user_name": "User name"}),
+        bold_columns={"Exact scores"},
+    )
 
     upset_rows = group_match_predictability(participants, results, teams, matches)
     st.subheader("Top 10 Biggest Upsets")
-    render_centered_dataframe(upset_rows.head(10))
+    render_centered_dataframe(
+        upset_rows.head(10),
+        bold_columns={"Actual winner predicted by (%)"},
+    )
     st.subheader("Top 10 Most Predictable Matches")
-    render_centered_dataframe(upset_rows.sort_values("Actual winner predicted by (%)", ascending=False).head(10))
+    render_centered_dataframe(
+        upset_rows.sort_values("Actual winner predicted by (%)", ascending=False).head(10),
+        bold_columns={"Actual winner predicted by (%)"},
+    )
 
 
 def group_match_predictability(
@@ -3607,10 +3739,9 @@ def group_match_predictability(
                 "Match": f"{match_id}: {team_name(match['home_team'], teams)} vs {team_name(match['away_team'], teams)}",
                 "Actual": f"{actual[0]}-{actual[1]}",
                 "Actual winner predicted by (%)": round(100 * correct / total, 1),
-                "Prediction count": total,
             }
         )
-    columns = ["Match", "Actual", "Actual winner predicted by (%)", "Prediction count"]
+    columns = ["Match", "Actual", "Actual winner predicted by (%)"]
     if not rows:
         return pd.DataFrame(columns=columns)
     return pd.DataFrame(rows, columns=columns).sort_values("Actual winner predicted by (%)", ascending=True)
@@ -3639,22 +3770,43 @@ def render_per_match_scores(
         selected_humans = st.multiselect("Users", human_names, default=human_names, key="per_match_users")
     with ai_col:
         selected_ais = st.multiselect("AI predictions", ai_names, key="per_match_ai")
-    participants = [p for p in humans if p["user_name"] in selected_humans] + [p for p in ais if p["user_name"] in selected_ais]
+    participants = sorted(
+        [p for p in humans if p["user_name"] in selected_humans]
+        + [p for p in ais if p["user_name"] in selected_ais],
+        key=lambda participant: participant["user_name"].lower(),
+    )
     match = matches[matches["match_id"].eq(selected_match_id)].iloc[0]
     scoped_results = results_through_match(results, matches, selected_match_id)
-    actual_state = derive_tournament_state(teams, matches, scoped_results, knockout_matchups, third_place_combinations, use_cards=True)
     actual_rows = score_lookup(scoped_results)
-    actual_resolved_rows = score_lookup(actual_state["resolved_matches"])
+    is_knockout_match = str(match["stage"]) in KNOCKOUT_STAGES
+    actual_resolved_rows = {}
+    if is_knockout_match:
+        actual_state = derive_tournament_state(
+            teams,
+            matches,
+            scoped_results,
+            knockout_matchups,
+            third_place_combinations,
+            use_cards=True,
+        )
+        actual_resolved_rows = score_lookup(actual_state["resolved_matches"])
     rows = []
     winner_counts: dict[str, int] = {}
     matchup_counts: dict[str, int] = {}
     score_counts: dict[str, int] = {}
     for participant in participants:
-        prediction_state = derive_tournament_state(
-            teams, matches, participant["predictions"], knockout_matchups, third_place_combinations, use_cards=False
-        )
         prediction_rows = score_lookup(participant["predictions"])
-        prediction_resolved_rows = score_lookup(prediction_state["resolved_matches"])
+        prediction_resolved_rows = {}
+        if is_knockout_match:
+            prediction_state = derive_tournament_state(
+                teams,
+                matches,
+                participant["predictions"],
+                knockout_matchups,
+                third_place_combinations,
+                use_cards=False,
+            )
+            prediction_resolved_rows = score_lookup(prediction_state["resolved_matches"])
         points = match_score_points_for_match(
             match, prediction_rows, actual_rows, prediction_resolved_rows, actual_resolved_rows
         )
@@ -3664,7 +3816,7 @@ def render_per_match_scores(
         score_text = prediction_score_text(prediction)
         winner_counts[winner] = winner_counts.get(winner, 0) + 1
         score_counts[score_text] = score_counts.get(score_text, 0) + 1
-        if str(match["stage"]) in KNOCKOUT_STAGES:
+        if is_knockout_match:
             matchup = matchup_text_from_resolved(resolved_row, teams)
             matchup_counts[matchup] = matchup_counts.get(matchup, 0) + 1
         rows.append(
@@ -3675,7 +3827,11 @@ def render_per_match_scores(
                 "Points earned": points["total_points"],
             }
         )
-    render_centered_dataframe(pd.DataFrame(rows), {"User name"})
+    render_centered_dataframe(
+        pd.DataFrame(rows),
+        {"User name"},
+        bold_columns={"Actual score"},
+    )
     if matchup_counts:
         st.subheader("Most Common Predicted Matchup")
         matchup_table = pd.DataFrame(
@@ -3690,8 +3846,6 @@ def render_per_match_scores(
         st.subheader("Most Common Predicted Score")
         score_table = pd.DataFrame({"Prediction": list(score_counts), "Count": list(score_counts.values())}).sort_values("Count", ascending=False)
         render_padded_bar_chart(score_table, x="Prediction", y="Count")
-        unique_count = int((score_table["Count"] == 1).sum())
-        st.caption(f"Unique predicted scores: {unique_count}")
 
 
 def render_per_user_scores(
@@ -3717,22 +3871,41 @@ def render_per_user_scores(
     with ai_col:
         selected_ais = st.multiselect("AI predictions", ai_names, key="per_user_ai")
     phase = st.selectbox("Phase", ["Group stage", "Knockout phase"], key="per_user_phase")
-    selected = [participant for participant in humans if participant["user_name"] in selected_humans] + [
-        participant for participant in ais if participant["user_name"] in selected_ais
-    ]
+    selected = sorted(
+        [participant for participant in humans if participant["user_name"] in selected_humans]
+        + [participant for participant in ais if participant["user_name"] in selected_ais],
+        key=lambda participant: participant["user_name"].lower(),
+    )
     stage_filter = [GROUP_STAGE] if phase == "Group stage" else KNOCKOUT_STAGES
     rows = []
     actual_rows = score_lookup(results)
-    actual_state = derive_tournament_state(
-        teams, matches, results, knockout_matchups, third_place_combinations, use_cards=True
-    )
-    actual_resolved_rows = score_lookup(actual_state["resolved_matches"])
-    prediction_states = {
-        participant["user_id"]: derive_tournament_state(
-            teams, matches, participant["predictions"], knockout_matchups, third_place_combinations, use_cards=False
-        )
+    prediction_rows = {
+        participant["user_id"]: score_lookup(participant["predictions"])
         for participant in selected
     }
+    actual_resolved_rows = {}
+    prediction_states = {}
+    prediction_resolved_rows = {}
+    if phase == "Knockout phase":
+        actual_state = derive_tournament_state(
+            teams, matches, results, knockout_matchups, third_place_combinations, use_cards=True
+        )
+        actual_resolved_rows = score_lookup(actual_state["resolved_matches"])
+        prediction_states = {
+            participant["user_id"]: derive_tournament_state(
+                teams,
+                matches,
+                participant["predictions"],
+                knockout_matchups,
+                third_place_combinations,
+                use_cards=False,
+            )
+            for participant in selected
+        }
+        prediction_resolved_rows = {
+            user_id: score_lookup(state["resolved_matches"])
+            for user_id, state in prediction_states.items()
+        }
     for _, match in matches[matches["stage"].isin(stage_filter)].iterrows():
         if phase == "Group stage":
             row = {
@@ -3741,7 +3914,9 @@ def render_per_user_scores(
                 "Actual score": prediction_score_text(actual_rows.get(match["match_id"])),
             }
             for participant in selected:
-                row[participant["user_name"]] = prediction_score_text(score_lookup(participant["predictions"]).get(match["match_id"]))
+                row[participant["user_name"]] = prediction_score_text(
+                    prediction_rows[participant["user_id"]].get(match["match_id"])
+                )
         else:
             actual_score = completed_score(actual_rows.get(match["match_id"]))
             row = {
@@ -3755,9 +3930,8 @@ def render_per_user_scores(
                 "Actual score": prediction_score_text(actual_rows.get(match["match_id"])),
             }
             for participant in selected:
-                prediction_state = prediction_states[participant["user_id"]]
-                resolved = score_lookup(prediction_state["resolved_matches"]).get(match["match_id"], {})
-                prediction_row = score_lookup(participant["predictions"]).get(match["match_id"])
+                resolved = prediction_resolved_rows[participant["user_id"]].get(match["match_id"], {})
+                prediction_row = prediction_rows[participant["user_id"]].get(match["match_id"])
                 predicted_score = completed_score(prediction_row)
                 home = team_name(str(resolved.get("home_team", "")), teams)
                 away = team_name(str(resolved.get("away_team", "")), teams)
@@ -3770,9 +3944,13 @@ def render_per_user_scores(
                 row[f"{participant['user_name']} matchup"] = f"{home} vs {away}"
                 row[f"{participant['user_name']} score"] = prediction_score_text(prediction_row)
         rows.append(row)
-    render_centered_dataframe(pd.DataFrame(rows))
+    render_centered_dataframe(
+        pd.DataFrame(rows),
+        bold_columns={"Actual score"},
+    )
 
 
+@st.cache_data(show_spinner=False, hash_funcs={pd.DataFrame: dataframe_cache_key})
 def timeline_table(
     participants: list[dict[str, Any]],
     results: pd.DataFrame,
@@ -3783,9 +3961,25 @@ def timeline_table(
 ) -> pd.DataFrame:
     rows = []
     for match_id in completed_match_ids(results, matches):
-        snapshot = snapshot_with_rank_change(participants, results, matches, match_id, teams, knockout_matchups, third_place_combinations)
+        scoped_results = results_through_match(results, matches, match_id)
+        snapshot = leaderboard_snapshot(
+            participants,
+            scoped_results,
+            teams,
+            matches,
+            knockout_matchups,
+            third_place_combinations,
+        )
         for _, row in snapshot.iterrows():
-            rows.append({"Match": match_id, "User name": row["user_name"], "Points": row["total_points"], "Rank": row["rank"]})
+            rows.append(
+                {
+                    "Match": match_id,
+                    "User name": row["user_name"],
+                    "Participant type": "AI" if row["is_ai"] else "Human",
+                    "Points": row["total_points"],
+                    "Rank": row["rank"],
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -3806,13 +4000,45 @@ def render_timelines(
         selected_humans = st.multiselect("Users", human_names, default=human_names[: min(5, len(human_names))], key="timeline_users")
     with ai_col:
         selected_ais = st.multiselect("AI predictions", ai_names, key="timeline_ai")
-    score_participants = [p for p in humans if p["user_name"] in selected_humans] + [p for p in ais if p["user_name"] in selected_ais]
-    score_timeline = timeline_table(score_participants, results, teams, matches, knockout_matchups, third_place_combinations)
+    timeline_color_domain = sorted(
+        [participant["user_name"] for participant in humans + ais],
+        key=str.lower,
+    )
+    full_rank_timeline = timeline_table(
+        humans, results, teams, matches, knockout_matchups, third_place_combinations
+    )
+    human_score_timeline = (
+        full_rank_timeline[full_rank_timeline["User name"].isin(selected_humans)]
+        if not full_rank_timeline.empty
+        else full_rank_timeline
+    )
+    selected_ai_participants = [p for p in ais if p["user_name"] in selected_ais]
+    ai_score_timeline = timeline_table(
+        selected_ai_participants,
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+    )
+    score_timeline = pd.concat(
+        [human_score_timeline, ai_score_timeline],
+        ignore_index=True,
+    )
     if not score_timeline.empty:
         st.subheader("Score Timeline")
-        render_padded_line_chart(score_timeline, x="Match", y="Points", color="User name")
-    rank_participants = [p for p in humans if p["user_name"] in selected_humans]
-    rank_timeline = timeline_table(rank_participants, results, teams, matches, knockout_matchups, third_place_combinations)
+        render_padded_line_chart(
+            score_timeline,
+            x="Match",
+            y="Points",
+            color="User name",
+            color_domain=timeline_color_domain,
+        )
+    rank_timeline = (
+        full_rank_timeline[full_rank_timeline["User name"].isin(selected_humans)]
+        if not full_rank_timeline.empty
+        else full_rank_timeline
+    )
     if not rank_timeline.empty:
         st.subheader("Rank Timeline")
         max_rank = max(1, int(rank_timeline["Rank"].max()))
@@ -3824,10 +4050,11 @@ def render_timelines(
             color="User name",
             reverse_y=True,
             y_values=rank_ticks,
+            color_domain=timeline_color_domain,
         )
-        st.caption("Rank 1 is shown at the top.")
+    if not full_rank_timeline.empty:
         st.subheader("Top 5 Over Time")
-        render_top_five_over_time_chart(rank_timeline)
+        render_top_five_over_time_chart(full_rank_timeline, timeline_color_domain)
 
 
 def render_human_vs_ai(
@@ -3852,12 +4079,17 @@ def render_human_vs_ai(
                 "Group": label,
                 "Average score": round(float(subset["total_points"].mean()), 1) if not subset.empty else 0,
                 "Best score": int(subset["total_points"].max()) if not subset.empty else 0,
-                "Correct winners": int(subset["correct_winners"].sum()) if not subset.empty else 0,
-                "Exact score components": int(subset["exact_goal_components"].sum()) if not subset.empty else 0,
+                "Correct winners per user": round(float(subset["correct_winners"].mean()), 1) if not subset.empty else 0,
+                "Exact score components per user": (
+                    round(float(subset["exact_goal_components"].mean()), 1) if not subset.empty else 0
+                ),
             }
         )
     st.subheader("Human vs AI Summary")
-    render_centered_dataframe(pd.DataFrame(metrics))
+    render_centered_dataframe(
+        pd.DataFrame(metrics),
+        bold_columns={"Average score"},
+    )
     st.subheader("Leaderboard Including AI")
     display_leaderboard_table(snapshot, include_change=False, highlight_ai=True)
 
@@ -3886,7 +4118,7 @@ def render_prediction_analysis(
     with human_col:
         include_humans = st.checkbox("Humans", value=True, key="prediction_analysis_include_humans")
     with ai_col:
-        include_ai = st.checkbox("AI predictions", value=True, key="prediction_analysis_include_ai")
+        include_ai = st.checkbox("AI predictions", value=False, key="prediction_analysis_include_ai")
     if not include_humans and not include_ai:
         st.info("Select at least one category: Humans or AI predictions.")
         return
@@ -3974,43 +4206,49 @@ def render_endgame_scenarios(
             st.write(f"{row['User name']} can still overtake the leader by gaining at least {gap + 1} more points than the current leader over the remaining scoring opportunities.")
 
 
-def render_leaderboard() -> None:
+def render_leaderboard(
+    users: pd.DataFrame,
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+) -> None:
     st.header("Leaderboard")
-    ensure_data_files()
-    teams = read_csv(TEAMS_FILE)
-    matches = read_csv(MATCHES_FILE)
-    results = normalize_results(read_csv(RESULTS_FILE))
-    users = normalize_users(read_csv(USERS_FILE))
-    knockout_matchups = read_csv(KNOCKOUT_MATCHUPS_FILE)
-    third_place_combinations = read_csv(THIRD_PLACE_COMBINATIONS_FILE)
-
-    tabs = st.tabs(
-        [
-            "Leaderboard",
-            "Additional Rankings",
-            "Per Match Scores",
-            "Per User Scores",
-            "Timelines",
-            "Human vs AI",
-            "Prediction Analysis",
-            "Endgame Scenarios",
-        ]
+    sections = [
+        "Leaderboard",
+        "Additional Rankings",
+        "Per Match Scores",
+        "Per User Scores",
+        "Timelines",
+        "Human vs AI",
+        "Prediction Analysis",
+        "Endgame Scenarios",
+    ]
+    selected_section = st.segmented_control(
+        "Leaderboard section",
+        sections,
+        default=sections[0],
+        required=True,
+        key="leaderboard_section",
+        label_visibility="collapsed",
+        width="stretch",
     )
-    with tabs[0]:
+    if selected_section == "Leaderboard":
         render_default_leaderboard(users, results, teams, matches, knockout_matchups, third_place_combinations)
-    with tabs[1]:
+    elif selected_section == "Additional Rankings":
         render_additional_rankings(users, results, teams, matches, knockout_matchups, third_place_combinations)
-    with tabs[2]:
+    elif selected_section == "Per Match Scores":
         render_per_match_scores(users, results, teams, matches, knockout_matchups, third_place_combinations)
-    with tabs[3]:
+    elif selected_section == "Per User Scores":
         render_per_user_scores(users, results, teams, matches, knockout_matchups, third_place_combinations)
-    with tabs[4]:
+    elif selected_section == "Timelines":
         render_timelines(users, results, teams, matches, knockout_matchups, third_place_combinations)
-    with tabs[5]:
+    elif selected_section == "Human vs AI":
         render_human_vs_ai(users, results, teams, matches, knockout_matchups, third_place_combinations)
-    with tabs[6]:
+    elif selected_section == "Prediction Analysis":
         render_prediction_analysis(users, teams, matches, knockout_matchups, third_place_combinations)
-    with tabs[7]:
+    elif selected_section == "Endgame Scenarios":
         render_endgame_scenarios(users, results, teams, matches, knockout_matchups, third_place_combinations)
 
 
@@ -4065,7 +4303,7 @@ def main() -> None:
     elif page == "Results":
         render_results(teams, matches, results, knockout_matchups, third_place_combinations)
     elif page == "Leaderboard":
-        render_leaderboard()
+        render_leaderboard(users, results, teams, matches, knockout_matchups, third_place_combinations)
 
 
 def render_google_sheets_rate_limit_dialog() -> None:
