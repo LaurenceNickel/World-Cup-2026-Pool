@@ -3747,6 +3747,35 @@ def group_match_predictability(
     return pd.DataFrame(rows, columns=columns).sort_values("Actual winner predicted by (%)", ascending=True)
 
 
+def per_match_score_options(
+    results: pd.DataFrame,
+    matches: pd.DataFrame,
+    teams: pd.DataFrame,
+) -> tuple[list[tuple[str, str]], int]:
+    result_rows = score_lookup(results)
+    options = []
+    first_uncompleted_index = None
+
+    for _, match in matches.iterrows():
+        match_id = str(match["match_id"])
+        home_team = team_name(match.get("home_team", ""), teams)
+        away_team = team_name(match.get("away_team", ""), teams)
+        score = completed_score(result_rows.get(match_id))
+        if score is None:
+            label = f"{match_id}: {home_team} vs {away_team}"
+            if first_uncompleted_index is None:
+                first_uncompleted_index = len(options)
+        else:
+            label = f"{match_id}: {home_team} {score[0]}-{score[1]} {away_team}"
+        options.append((match_id, label))
+
+    if not options:
+        return [], 0
+    if first_uncompleted_index is not None:
+        return options, first_uncompleted_index
+    return options, len(options) - 1
+
+
 def render_per_match_scores(
     users: pd.DataFrame,
     results: pd.DataFrame,
@@ -3759,12 +3788,18 @@ def render_per_match_scores(
     ais = load_ai_predictions()
     human_names = sorted([participant["user_name"] for participant in humans], key=str.lower)
     ai_names = sorted([participant["user_name"] for participant in ais], key=str.lower)
-    match_labels = sorted([
-        f"{row['match_id']}: {team_name(row.get('home_team', ''), teams)} vs {team_name(row.get('away_team', ''), teams)}"
-        for _, row in matches.iterrows()
-    ], key=str.lower)
-    selected_match_label = st.selectbox("Match", match_labels, key="per_match_match")
-    selected_match_id = selected_match_label.split(":", 1)[0]
+    match_options, default_match_index = per_match_score_options(results, matches, teams)
+    if not match_options:
+        st.info("No matches are available.")
+        return
+    match_labels = [label for _, label in match_options]
+    selected_match_label = st.selectbox(
+        "Match",
+        match_labels,
+        index=default_match_index,
+        key="per_match_match",
+    )
+    selected_match_id = dict((label, match_id) for match_id, label in match_options)[selected_match_label]
     user_col, ai_col = st.columns([0.6, 0.4])
     with user_col:
         selected_humans = st.multiselect("Users", human_names, default=human_names, key="per_match_users")
