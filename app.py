@@ -3563,60 +3563,6 @@ def render_padded_line_chart(
         st.markdown("</div>", unsafe_allow_html=True)
 
 
-def render_top_five_over_time_chart(table: pd.DataFrame, color_domain: list[str]) -> None:
-    if table.empty:
-        return
-    top_five = table[table["Rank"] <= 5].copy()
-    if top_five.empty:
-        return
-    labels = sorted(top_five["User name"].dropna().astype(str).unique(), key=str.lower)
-    participant_types = (
-        top_five[["User name", "Participant type"]]
-        .drop_duplicates(subset=["User name"])
-        .set_index("User name")["Participant type"]
-        .astype(str)
-        .to_dict()
-    )
-    color_range = [
-        TIMELINE_COLORS[index % len(TIMELINE_COLORS)]
-        for index in range(len(color_domain))
-    ]
-    chart = (
-        alt.Chart(top_five)
-        .mark_point(size=95)
-        .encode(
-            x=alt.X("Match:N", title="Match", sort=None),
-            y=alt.Y(
-                "Rank:Q",
-                title="Rank",
-                scale=alt.Scale(domain=[5, 1], nice=False),
-                axis=alt.Axis(values=[1, 2, 3, 4, 5], format="d"),
-            ),
-            color=alt.Color(
-                "User name:N",
-                legend=None,
-                scale=alt.Scale(domain=color_domain, range=color_range),
-            ),
-            shape=alt.Shape(
-                "Participant type:N",
-                legend=None,
-                scale=alt.Scale(domain=["Human", "AI"], range=["circle", "triangle-up"]),
-            ),
-            size=alt.Size("Points:Q", title="Points", legend=alt.Legend(title="Points")),
-            tooltip=["Match", "User name", "Participant type", "Points", "Rank"],
-        )
-        .properties(height=330)
-        .configure_view(strokeWidth=0)
-        .configure_axis(labelColor=DEFAULT_THEME["primary"], titleColor=DEFAULT_THEME["primary"], tickColor=DEFAULT_THEME["primary"], domainColor=DEFAULT_THEME["primary"])
-        .configure_legend(labelColor=DEFAULT_THEME["primary"], titleColor=DEFAULT_THEME["primary"])
-        .configure(background="transparent")
-    )
-    with st.container():
-        st.markdown('<div class="figure-pad">', unsafe_allow_html=True)
-        render_chart_with_scrollable_legend(chart, labels, color_domain, participant_types)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-
 def render_default_leaderboard(
     users: pd.DataFrame,
     results: pd.DataFrame,
@@ -3666,11 +3612,16 @@ def render_additional_rankings(
         st.info("Additional rankings will appear once participants have submitted predictions.")
         return
 
-    st.subheader("Most Correct Winners")
-    winners = add_rank(snapshot[["user_name", "correct_winners"]].rename(columns={"correct_winners": "Correct winners"}), "Correct winners")
+    st.subheader("Most Correct Outcomes")
+    winners = add_rank(
+        snapshot[["user_name", "correct_winners"]].rename(
+            columns={"correct_winners": "Correct outcomes"}
+        ),
+        "Correct outcomes",
+    )
     render_centered_dataframe(
         winners.rename(columns={"rank": "Rank", "user_name": "User name"}),
-        bold_columns={"Correct winners"},
+        bold_columns={"Correct outcomes"},
     )
 
     st.subheader("Most Exact Score Components")
@@ -3700,12 +3651,12 @@ def render_additional_rankings(
     st.subheader("Top 10 Biggest Upsets")
     render_centered_dataframe(
         upset_rows.head(10),
-        bold_columns={"Actual winner predicted by (%)"},
+        bold_columns={"Actual outcome predicted by (%)"},
     )
     st.subheader("Top 10 Most Predictable Matches")
     render_centered_dataframe(
-        upset_rows.sort_values("Actual winner predicted by (%)", ascending=False).head(10),
-        bold_columns={"Actual winner predicted by (%)"},
+        upset_rows.sort_values("Actual outcome predicted by (%)", ascending=False).head(10),
+        bold_columns={"Actual outcome predicted by (%)"},
     )
 
 
@@ -3734,17 +3685,26 @@ def group_match_predictability(
             correct += int(score_side(*predicted) == actual_side)
         if total == 0:
             continue
+        if actual_side == "draw":
+            outcome = "Draw"
+        elif actual_side == "home":
+            outcome = f"{team_name(match['home_team'], teams)} Win"
+        else:
+            outcome = f"{team_name(match['away_team'], teams)} Win"
         rows.append(
             {
-                "Match": f"{match_id}: {team_name(match['home_team'], teams)} vs {team_name(match['away_team'], teams)}",
-                "Actual": f"{actual[0]}-{actual[1]}",
-                "Actual winner predicted by (%)": round(100 * correct / total, 1),
+                "Match": (
+                    f"{match_id}: {team_name(match['home_team'], teams)} "
+                    f"{actual[0]}-{actual[1]} {team_name(match['away_team'], teams)}"
+                ),
+                "Outcome": outcome,
+                "Actual outcome predicted by (%)": round(100 * correct / total, 1),
             }
         )
-    columns = ["Match", "Actual", "Actual winner predicted by (%)"]
+    columns = ["Match", "Outcome", "Actual outcome predicted by (%)"]
     if not rows:
         return pd.DataFrame(columns=columns)
-    return pd.DataFrame(rows, columns=columns).sort_values("Actual winner predicted by (%)", ascending=True)
+    return pd.DataFrame(rows, columns=columns).sort_values("Actual outcome predicted by (%)", ascending=True)
 
 
 def per_match_score_options(
@@ -3895,13 +3855,22 @@ def render_per_user_scores(
     ais = load_ai_predictions()
     human_names = sorted([participant["user_name"] for participant in humans], key=str.lower)
     ai_names = sorted([participant["user_name"] for participant in ais], key=str.lower)
+    default_humans = leaderboard_default_human_names(
+        humans,
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+        rank_limit=3,
+    )
     user_col, ai_col = st.columns([0.6, 0.4])
     with user_col:
         selected_humans = st.multiselect(
             "Users",
             human_names,
-            default=human_names[: min(3, len(human_names))],
-            key="per_user_users",
+            default=default_humans,
+            key="per_user_users_leaders",
         )
     with ai_col:
         selected_ais = st.multiselect("AI predictions", ai_names, key="per_user_ai")
@@ -4018,6 +3987,35 @@ def timeline_table(
     return pd.DataFrame(rows)
 
 
+def leaderboard_default_human_names(
+    humans: list[dict[str, Any]],
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+    rank_limit: int,
+) -> list[str]:
+    human_names = sorted(
+        [participant["user_name"] for participant in humans],
+        key=str.lower,
+    )
+    completed_ids = completed_match_ids(results, matches)
+    if not completed_ids:
+        return human_names[: min(rank_limit, len(human_names))]
+
+    scoped_results = results_through_match(results, matches, completed_ids[-1])
+    snapshot = leaderboard_snapshot(
+        humans,
+        scoped_results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+    )
+    return snapshot[snapshot["rank"] <= rank_limit]["user_name"].tolist()
+
+
 def render_timelines(
     users: pd.DataFrame,
     results: pd.DataFrame,
@@ -4030,9 +4028,23 @@ def render_timelines(
     ais = load_ai_predictions()
     human_names = sorted([participant["user_name"] for participant in humans], key=str.lower)
     ai_names = sorted([participant["user_name"] for participant in ais], key=str.lower)
+    default_humans = leaderboard_default_human_names(
+        humans,
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+        rank_limit=5,
+    )
     user_col, ai_col = st.columns([0.6, 0.4])
     with user_col:
-        selected_humans = st.multiselect("Users", human_names, default=human_names[: min(5, len(human_names))], key="timeline_users")
+        selected_humans = st.multiselect(
+            "Users",
+            human_names,
+            default=default_humans,
+            key="timeline_users_leaders",
+        )
     with ai_col:
         selected_ais = st.multiselect("AI predictions", ai_names, key="timeline_ai")
     timeline_color_domain = sorted(
@@ -4087,11 +4099,6 @@ def render_timelines(
             y_values=rank_ticks,
             color_domain=timeline_color_domain,
         )
-    if not full_rank_timeline.empty:
-        st.subheader("Top 5 Over Time")
-        render_top_five_over_time_chart(full_rank_timeline, timeline_color_domain)
-
-
 def render_human_vs_ai(
     users: pd.DataFrame,
     results: pd.DataFrame,
