@@ -62,6 +62,15 @@ KNOCKOUT_STAGES = [
     "final",
 ]
 STAGES = [GROUP_STAGE, *KNOCKOUT_STAGES]
+FINISHING_STAGE_ORDER = [
+    "Group stage",
+    "Round of 32",
+    "Round of 16",
+    "Quarter-final",
+    "Semi-final",
+    "Final",
+    "Winner",
+]
 
 USERS_COLUMNS = ["user_id", "user_name", "total_points"]
 PENALTY_WINNER_COLUMN = "penalty_winner"
@@ -4201,7 +4210,10 @@ def render_prediction_analysis(
         stage = furthest_stage_for_team(state, selected_team_id)
         stage_counts[stage] = stage_counts.get(stage, 0) + 1
     stage_table = pd.DataFrame({"Stage": list(stage_counts), "Number of Predictions": list(stage_counts.values())})
-    render_centered_dataframe(stage_table.sort_values("Stage", key=lambda column: column.str.lower()))
+    stage_order = {stage: index for index, stage in enumerate(FINISHING_STAGE_ORDER)}
+    render_centered_dataframe(
+        stage_table.sort_values("Stage", key=lambda column: column.map(stage_order))
+    )
 
 
 def render_endgame_scenarios(
