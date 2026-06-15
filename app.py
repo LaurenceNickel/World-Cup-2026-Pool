@@ -4179,8 +4179,15 @@ def render_prediction_analysis(
         winner_counts[team_name(winner, teams)] = winner_counts.get(team_name(winner, teams), 0) + 1
     st.subheader("Predicted World Cup Winners")
     if winner_counts:
+        winner_table = pd.DataFrame(
+            {"Country": list(winner_counts), "Predictions": list(winner_counts.values())}
+        ).sort_values(
+            ["Predictions", "Country"],
+            ascending=[False, True],
+            key=lambda column: column.str.lower() if column.name == "Country" else column,
+        )
         render_padded_bar_chart(
-            pd.DataFrame({"Country": list(winner_counts), "Predictions": list(winner_counts.values())}),
+            winner_table,
             x="Country",
             y="Predictions",
         )
