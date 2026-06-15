@@ -4121,7 +4121,7 @@ def render_human_vs_ai(
                 "Group": label,
                 "Average score": round(float(subset["total_points"].mean()), 1) if not subset.empty else 0,
                 "Best score": int(subset["total_points"].max()) if not subset.empty else 0,
-                "Correct winners per user": round(float(subset["correct_winners"].mean()), 1) if not subset.empty else 0,
+                "Correct outcomes per user": round(float(subset["correct_winners"].mean()), 1) if not subset.empty else 0,
                 "Exact score components per user": (
                     round(float(subset["exact_goal_components"].mean()), 1) if not subset.empty else 0
                 ),
