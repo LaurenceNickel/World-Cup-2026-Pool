@@ -3656,15 +3656,24 @@ def render_additional_rankings(
         bold_columns={"Exact scores"},
     )
 
-    upset_rows = group_match_predictability(participants, results, teams, matches)
+    predictability_rows = group_match_predictability(participants, results, teams, matches)
     st.subheader("Top 10 Biggest Upsets")
+    exclude_upset_draws = st.checkbox("Exclude draws", key="biggest_upsets_exclude_draws")
+    upset_rows = predictability_rows
+    if exclude_upset_draws and not upset_rows.empty:
+        upset_rows = upset_rows[upset_rows["Outcome"] != "Draw"]
     render_centered_dataframe(
         upset_rows.head(10),
         bold_columns={"Actual outcome predicted by (%)"},
     )
+
     st.subheader("Top 10 Most Predictable Matches")
+    exclude_predictable_draws = st.checkbox("Exclude draws", key="most_predictable_exclude_draws")
+    predictable_rows = predictability_rows
+    if exclude_predictable_draws and not predictable_rows.empty:
+        predictable_rows = predictable_rows[predictable_rows["Outcome"] != "Draw"]
     render_centered_dataframe(
-        upset_rows.sort_values("Actual outcome predicted by (%)", ascending=False).head(10),
+        predictable_rows.sort_values("Actual outcome predicted by (%)", ascending=False).head(10),
         bold_columns={"Actual outcome predicted by (%)"},
     )
 
