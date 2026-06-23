@@ -2111,6 +2111,11 @@ def results_through_match(results: pd.DataFrame, matches: pd.DataFrame, through_
     return results[results["match_id"].isin(allowed)].copy()
 
 
+def results_for_stage(results: pd.DataFrame, matches: pd.DataFrame, stage: str) -> pd.DataFrame:
+    match_ids = set(matches[matches["stage"].eq(stage)]["match_id"].astype(str))
+    return results[results["match_id"].astype(str).isin(match_ids)].copy()
+
+
 def group_is_complete(group: str, matches: pd.DataFrame, results: pd.DataFrame, teams: pd.DataFrame) -> bool:
     team_groups = dict(zip(teams["team_id"], teams["group"]))
     group_matches = matches[
@@ -3830,15 +3835,23 @@ def table_display_value(value: Any) -> str:
     return html.escape(str(value))
 
 
-def is_left_aligned_column(column: str, left_columns: set[str] | None = None) -> bool:
+def is_left_aligned_column(
+    column: str,
+    left_columns: set[str] | None = None,
+    centered_columns: set[str] | None = None,
+) -> bool:
     column_lower = column.lower()
     left_lookup = {item.lower() for item in (left_columns or set())}
+    center_lookup = {item.lower() for item in (centered_columns or set())}
+    if column_lower in center_lookup:
+        return False
     return column_lower in {"user name", "user_name", "name"} or column_lower in left_lookup
 
 
 def render_centered_dataframe(
     table: pd.DataFrame,
     left_columns: set[str] | None = None,
+    centered_columns: set[str] | None = None,
     bold_columns: set[str] | None = None,
     row_classes: list[str] | None = None,
 ) -> None:
@@ -3853,7 +3866,7 @@ def render_centered_dataframe(
     headers = []
     for column in table.columns:
         classes = []
-        if is_left_aligned_column(str(column), left_columns):
+        if is_left_aligned_column(str(column), left_columns, centered_columns):
             classes.append("left")
         if str(column).lower() in bold_lookup:
             classes.append("bold")
@@ -3867,7 +3880,7 @@ def render_centered_dataframe(
         cells = []
         for column in table.columns:
             classes = []
-            if is_left_aligned_column(str(column), left_columns):
+            if is_left_aligned_column(str(column), left_columns, centered_columns):
                 classes.append("left")
             if str(column).lower() in bold_lookup:
                 classes.append("bold")
@@ -4174,8 +4187,7 @@ def render_additional_rankings(
     third_place_combinations: pd.DataFrame,
 ) -> None:
     participants = leaderboard_participants(users, include_ai=False)
-    match_ids = completed_match_ids(results, matches)
-    scoped_results = results_through_match(results, matches, match_ids[-1] if match_ids else None)
+    scoped_results = results_for_stage(results, matches, GROUP_STAGE)
     snapshot = leaderboard_snapshot(participants, scoped_results, teams, matches, knockout_matchups, third_place_combinations)
     if snapshot.empty:
         st.info("Additional rankings will appear once participants have submitted predictions.")
@@ -4216,7 +4228,7 @@ def render_additional_rankings(
         bold_columns={"Exact scores"},
     )
 
-    predictability_rows = group_match_predictability(participants, results, teams, matches)
+    predictability_rows = group_match_predictability(participants, scoped_results, teams, matches)
     st.subheader("Top 10 Biggest Upsets")
     exclude_upset_draws = st.checkbox("Exclude draws", key="biggest_upsets_exclude_draws")
     upset_rows = predictability_rows
@@ -4749,7 +4761,7 @@ def render_per_match_scores(
         )
     render_centered_dataframe(
         pd.DataFrame(rows),
-        {"User name"},
+        centered_columns={"User name"},
         bold_columns={"Points earned"},
     )
     if matchup_counts:
@@ -5042,19 +5054,45 @@ def render_human_vs_ai(
     match_ids = completed_match_ids(results, matches)
     scoped_results = results_through_match(results, matches, match_ids[-1] if match_ids else None)
     snapshot = leaderboard_snapshot(participants, scoped_results, teams, matches, knockout_matchups, third_place_combinations)
+    group_stage_results = results_for_stage(results, matches, GROUP_STAGE)
+    group_stage_snapshot = leaderboard_snapshot(
+        participants,
+        group_stage_results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+    )
     if snapshot.empty:
         st.info("No predictions available.")
         return
     metrics = []
-    for label, subset in [("Humans", snapshot[~snapshot["is_ai"]]), ("AI", snapshot[snapshot["is_ai"]])]:
+    for label, subset, group_stage_subset in [
+        (
+            "Humans",
+            snapshot[~snapshot["is_ai"]],
+            group_stage_snapshot[~group_stage_snapshot["is_ai"]],
+        ),
+        (
+            "AI",
+            snapshot[snapshot["is_ai"]],
+            group_stage_snapshot[group_stage_snapshot["is_ai"]],
+        ),
+    ]:
         metrics.append(
             {
                 "Group": label,
                 "Average score": round(float(subset["total_points"].mean()), 1) if not subset.empty else 0,
                 "Best score": int(subset["total_points"].max()) if not subset.empty else 0,
-                "Correct outcomes per user": round(float(subset["correct_winners"].mean()), 1) if not subset.empty else 0,
+                "Correct outcomes per user": (
+                    round(float(group_stage_subset["correct_winners"].mean()), 1)
+                    if not group_stage_subset.empty
+                    else 0
+                ),
                 "Exact score components per user": (
-                    round(float(subset["exact_goal_components"].mean()), 1) if not subset.empty else 0
+                    round(float(group_stage_subset["exact_goal_components"].mean()), 1)
+                    if not group_stage_subset.empty
+                    else 0
                 ),
             }
         )
