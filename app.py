@@ -62,6 +62,20 @@ KNOCKOUT_STAGES = [
     "final",
 ]
 STAGES = [GROUP_STAGE, *KNOCKOUT_STAGES]
+GROUP_STANDING_POSITION_POINTS = 3
+MATCH_OUTCOME_POINTS = 3
+MATCH_HOME_GOALS_POINTS = 1
+MATCH_AWAY_GOALS_POINTS = 1
+KNOCKOUT_STAGE_POINTS = {
+    "round_of_16": 5,
+    "quarter_final": 10,
+    "semi_final": 20,
+    "final": 25,
+}
+THIRD_PLACE_MATCH_ID = "M103"
+FINAL_MATCH_ID = "M104"
+THIRD_PLACE_WINNER_POINTS = 25
+CHAMPION_POINTS = 35
 FINISHING_STAGE_ORDER = [
     "Group stage",
     "Round of 32",
@@ -98,6 +112,7 @@ CARD_COLUMNS = [
     "away_indirect_red_cards",
     "away_direct_red_cards",
 ]
+CACHE_SCHEMA_VERSION = "confirmed-placement-v5"
 
 
 DEFAULT_THEME = {
@@ -728,6 +743,75 @@ def apply_visual_theme() -> None:
             border-bottom: 0;
         }
 
+        .knockout-progression-table {
+            table-layout: fixed;
+        }
+
+        .knockout-progression-table th:nth-child(1),
+        .knockout-progression-table td:nth-child(1) {
+            width: 13%;
+        }
+
+        .knockout-progression-table th:nth-child(2),
+        .knockout-progression-table td:nth-child(2) {
+            width: 9%;
+        }
+
+        .knockout-progression-table th:nth-child(3),
+        .knockout-progression-table td:nth-child(3) {
+            width: 12%;
+        }
+
+        .knockout-progression-table th:nth-child(4),
+        .knockout-progression-table td:nth-child(4) {
+            width: 36%;
+        }
+
+        .knockout-progression-table th:nth-child(5),
+        .knockout-progression-table td:nth-child(5) {
+            width: 30%;
+        }
+
+        .knockout-progression-table td,
+        .knockout-progression-table th {
+            overflow-wrap: anywhere;
+        }
+
+        .knockout-progression-table details summary {
+            cursor: pointer;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .knockout-detail-results {
+            margin-top: 0.55rem;
+            line-height: 1.55;
+        }
+
+        .team-progress-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.28rem 0.38rem;
+        }
+
+        .team-progress-chip {
+            display: inline-block;
+            line-height: 1.25;
+            font-weight: 600;
+        }
+
+        .team-progress-chip.advanced {
+            color: #167a3a;
+        }
+
+        .team-progress-chip.eliminated {
+            color: #b42318;
+        }
+
+        .team-progress-chip.pending {
+            color: #000000;
+        }
+
         .figure-pad {
             padding: 0.75rem 0.65rem 1.1rem;
             margin: 0.35rem 0 1.25rem;
@@ -743,9 +827,11 @@ def apply_visual_theme() -> None:
         }
 
         .standings-legend {
-            display: flex;
+            display: grid;
+            grid-template-columns: auto 1fr;
             align-items: center;
-            gap: 0.45rem;
+            column-gap: 0.45rem;
+            row-gap: 0.2rem;
             margin-top: 0.45rem;
             color: #000000;
             font-size: 0.82rem;
@@ -757,6 +843,15 @@ def apply_visual_theme() -> None:
             border: 1px solid #9bcfa9;
             background: #dff4e5;
             border-radius: 3px;
+        }
+
+        .standings-legend-detail {
+            grid-column: 2;
+        }
+
+        .qualification-marker {
+            font-weight: 800;
+            margin-left: 0.2rem;
         }
 
         .rules-phase-heading {
@@ -804,6 +899,12 @@ def apply_visual_theme() -> None:
     for placeholder, value in replacements.items():
         css = css.replace(placeholder, value)
     st.markdown(css, unsafe_allow_html=True)
+
+
+def clear_stale_streamlit_cache() -> None:
+    if st.session_state.get("cache_schema_version") == CACHE_SCHEMA_VERSION:
+        return
+    st.session_state["cache_schema_version"] = CACHE_SCHEMA_VERSION
 
 
 def ensure_data_files() -> None:
@@ -1408,6 +1509,21 @@ def team_badge_html(team_id: str | None, teams: pd.DataFrame, fallback: str = "T
     return f'<span class="team-badge"><img src="{logo}" alt=""> <span>{safe_name}</span></span>'
 
 
+def team_badge_with_status_html(
+    team_id: str | None,
+    teams: pd.DataFrame,
+    qualification_statuses: dict[str, str] | None = None,
+    fallback: str = "TBD",
+) -> str:
+    badge = team_badge_html(team_id, teams, fallback)
+    status = (qualification_statuses or {}).get(str(team_id), "")
+    if status == "advanced":
+        return f'{badge} <strong class="qualification-marker">(A)</strong>'
+    if status == "eliminated":
+        return f'{badge} <strong class="qualification-marker">(E)</strong>'
+    return badge
+
+
 def table_cell_class(numeric: bool, extra_class: str = "") -> str:
     classes = []
     if numeric:
@@ -1459,7 +1575,14 @@ def render_html_table(headers: list[tuple[Any, ...]], rows: list[Any], table_cla
 
 def display_advancing_legend() -> None:
     st.markdown(
-        '<div class="standings-legend"><span class="standings-legend-swatch"></span><span>Advances to the next round</span></div>',
+        (
+            '<div class="standings-legend">'
+            '<span class="standings-legend-swatch"></span>'
+            '<span>Green row: currently advances to the next round.</span>'
+            '<div class="standings-legend-detail"><strong>(A)</strong>: Advanced to Round of 32</div>'
+            '<div class="standings-legend-detail"><strong>(E)</strong>: Eliminated</div>'
+            '</div>'
+        ),
         unsafe_allow_html=True,
     )
 
@@ -1654,79 +1777,27 @@ def sort_group_table(
     return pd.DataFrame([table_by_team[team_id] for team_id in ordered_team_ids])
 
 
+def calculate_single_group_standing(
+    group: str,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    score_df: pd.DataFrame,
+    use_cards: bool,
+) -> pd.DataFrame:
+    score_rows = score_lookup(score_df)
+    return group_standing_from_score_rows(group, teams, matches, score_rows, use_cards)
+
+
 def calculate_group_standings(
     teams: pd.DataFrame,
     matches: pd.DataFrame,
     score_df: pd.DataFrame,
     use_cards: bool,
 ) -> dict[str, pd.DataFrame]:
-    score_rows = score_lookup(score_df)
-    rankings = {row["team_id"]: to_int(row["world_cup_ranking"], 9999) for _, row in teams.iterrows()}
     standings: dict[str, pd.DataFrame] = {}
 
     for group in GROUPS:
-        group_teams = teams[teams["group"] == group]["team_id"].tolist()
-        rows = {
-            team_id: {
-                "team_id": team_id,
-                "games_played": 0,
-                "wins": 0,
-                "draws": 0,
-                "losses": 0,
-                "goals_for": 0,
-                "goals_against": 0,
-                "goal_difference": 0,
-                "fair_play_score": 0,
-                "points": 0,
-            }
-            for team_id in group_teams
-        }
-
-        group_matches = matches[
-            (matches["stage"] == GROUP_STAGE)
-            & (matches["home_team"].isin(group_teams))
-            & (matches["away_team"].isin(group_teams))
-        ]
-
-        for _, match in group_matches.iterrows():
-            score = completed_score(score_rows.get(match["match_id"]))
-            if score is None:
-                continue
-
-            home_id = match["home_team"]
-            away_id = match["away_team"]
-            home_goals, away_goals = score
-
-            rows[home_id]["games_played"] += 1
-            rows[away_id]["games_played"] += 1
-            rows[home_id]["goals_for"] += home_goals
-            rows[home_id]["goals_against"] += away_goals
-            rows[away_id]["goals_for"] += away_goals
-            rows[away_id]["goals_against"] += home_goals
-
-            if home_goals > away_goals:
-                rows[home_id]["wins"] += 1
-                rows[home_id]["points"] += 3
-                rows[away_id]["losses"] += 1
-            elif home_goals < away_goals:
-                rows[away_id]["wins"] += 1
-                rows[away_id]["points"] += 3
-                rows[home_id]["losses"] += 1
-            else:
-                rows[home_id]["draws"] += 1
-                rows[away_id]["draws"] += 1
-                rows[home_id]["points"] += 1
-                rows[away_id]["points"] += 1
-
-            if use_cards:
-                card_row = score_rows.get(match["match_id"], {})
-                rows[home_id]["fair_play_score"] += fair_play_delta(card_row, "home")
-                rows[away_id]["fair_play_score"] += fair_play_delta(card_row, "away")
-
-        table = pd.DataFrame(rows.values())
-        table["goal_difference"] = table["goals_for"] - table["goals_against"]
-        table = sort_group_table(table, group_matches, score_rows, rankings)
-        standings[group] = table[STANDING_COLUMNS].reset_index(drop=True)
+        standings[group] = calculate_single_group_standing(group, teams, matches, score_df, use_cards)
 
     return standings
 
@@ -1766,12 +1837,18 @@ def find_third_place_combination(third_place: pd.DataFrame, combinations: pd.Dat
     return None
 
 
-def resolve_position_slot(slot: str, group_standings: dict[str, pd.DataFrame]) -> str | None:
+def resolve_position_slot(
+    slot: str,
+    group_standings: dict[str, pd.DataFrame],
+    confirmed_position_slots: set[str] | None = None,
+) -> str | None:
     match = re.fullmatch(r"([123])([A-L])", slot)
     if not match:
         return None
     position = int(match.group(1)) - 1
     group = match.group(2)
+    if confirmed_position_slots is not None and slot not in confirmed_position_slots:
+        return None
     table = group_standings.get(group)
     if table is None or len(table) <= position:
         return None
@@ -1785,6 +1862,7 @@ def resolve_slot(
     combination_row: pd.Series | None,
     winners: dict[str, str],
     losers: dict[str, str],
+    confirmed_position_slots: set[str] | None = None,
 ) -> str | None:
     slot = str(slot).strip()
     if not slot:
@@ -1792,17 +1870,44 @@ def resolve_slot(
     if re.fullmatch(r"T\d+", slot):
         return slot
     if re.fullmatch(r"[12][A-L]|3[A-L]", slot):
-        return resolve_position_slot(slot, group_standings)
+        return resolve_position_slot(slot, group_standings, confirmed_position_slots)
     if re.fullmatch(r"3[A-L]{2,}", slot):
         if combination_row is None or counterpart_slot not in combination_row.index:
             return None
         concrete_slot = str(combination_row[counterpart_slot])
-        return resolve_position_slot(concrete_slot, group_standings)
+        return resolve_position_slot(concrete_slot, group_standings, confirmed_position_slots)
     if slot.startswith("winner_"):
         return winners.get(slot.replace("winner_", ""))
     if slot.startswith("loser_"):
         return losers.get(slot.replace("loser_", ""))
     return None
+
+
+def confirmed_group_position_slots(
+    group_standings: dict[str, pd.DataFrame],
+    matches: pd.DataFrame,
+    score_df: pd.DataFrame,
+    teams: pd.DataFrame,
+) -> set[str]:
+    confirmed_slots: set[str] = set()
+
+    for group, table in group_standings.items():
+        if group_is_complete(group, matches, score_df, teams):
+            confirmed_slots.update(f"{position + 1}{group}" for position in range(min(3, len(table))))
+            continue
+
+        context = group_lock_context(group, table, matches, score_df, teams)
+        for position, row in enumerate(table.head(3).itertuples(index=False)):
+            team_id = str(getattr(row, "team_id"))
+            teams_that_can_finish_above = sum(
+                1
+                for other_id in context["team_ids"]
+                if other_id != team_id and can_finish_above(other_id, team_id, context)
+            )
+            if teams_that_can_finish_above == position:
+                confirmed_slots.add(f"{position + 1}{group}")
+
+    return confirmed_slots
 
 
 def dataframe_cache_key(table: pd.DataFrame) -> tuple[Any, ...]:
@@ -1820,10 +1925,20 @@ def derive_tournament_state(
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
     use_cards: bool,
+    require_confirmed_placements: bool = False,
+    cache_schema_version: str = CACHE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     group_standings = calculate_group_standings(teams, matches, score_df, use_cards)
     third_place = calculate_third_place_standings(group_standings, teams)
-    combination_row = find_third_place_combination(third_place, third_place_combinations)
+    confirmed_position_slots = None
+    third_place_for_combination = third_place
+    if require_confirmed_placements:
+        confirmed_position_slots = confirmed_group_position_slots(group_standings, matches, score_df, teams)
+        if all(group_is_complete(group, matches, score_df, teams) for group in GROUPS):
+            third_place_for_combination = third_place
+        else:
+            third_place_for_combination = third_place.iloc[0:0].copy()
+    combination_row = find_third_place_combination(third_place_for_combination, third_place_combinations)
     score_rows = score_lookup(score_df)
     matchup_rows = {row["match_id"]: row.to_dict() for _, row in knockout_matchups.iterrows()}
 
@@ -1841,8 +1956,24 @@ def derive_tournament_state(
             matchup = matchup_rows.get(match_id, {})
             home_slot = str(matchup.get("home_team", "")).strip()
             away_slot = str(matchup.get("away_team", "")).strip()
-            home_id = resolve_slot(home_slot, away_slot, group_standings, combination_row, winners, losers)
-            away_id = resolve_slot(away_slot, home_slot, group_standings, combination_row, winners, losers)
+            home_id = resolve_slot(
+                home_slot,
+                away_slot,
+                group_standings,
+                combination_row,
+                winners,
+                losers,
+                confirmed_position_slots,
+            )
+            away_id = resolve_slot(
+                away_slot,
+                home_slot,
+                group_standings,
+                combination_row,
+                winners,
+                losers,
+                confirmed_position_slots,
+            )
 
         score = completed_score(score_rows.get(match_id))
         home_goals = away_goals = None
@@ -1883,6 +2014,7 @@ def derive_tournament_state(
         "resolved_matches": resolved_matches,
         "winners": winners,
         "losers": losers,
+        "confirmed_position_slots": confirmed_position_slots or set(),
     }
 
 
@@ -1936,6 +2068,30 @@ def calculate_user_points(
     )["total_points"]
 
 
+def team_groups_lookup(teams: pd.DataFrame) -> dict[str, str]:
+    if teams.empty or "team_id" not in teams.columns or "group" not in teams.columns:
+        return {}
+    return dict(zip(teams["team_id"].astype(str), teams["group"].astype(str)))
+
+
+def match_group(match: pd.Series, teams: pd.DataFrame) -> str:
+    if str(match.get("stage", "")) != GROUP_STAGE:
+        return ""
+    team_groups = team_groups_lookup(teams)
+    home_group = team_groups.get(str(match.get("home_team", "")), "")
+    away_group = team_groups.get(str(match.get("away_team", "")), "")
+    return home_group if home_group and home_group == away_group else ""
+
+
+def group_final_match_ids(matches: pd.DataFrame, teams: pd.DataFrame) -> dict[str, str]:
+    final_match_ids: dict[str, str] = {}
+    for _, match in matches.iterrows():
+        group = match_group(match, teams)
+        if group:
+            final_match_ids[group] = str(match["match_id"])
+    return final_match_ids
+
+
 def completed_match_ids(results: pd.DataFrame, matches: pd.DataFrame) -> list[str]:
     result_rows = score_lookup(results)
     ids = []
@@ -1968,6 +2124,179 @@ def group_is_complete(group: str, matches: pd.DataFrame, results: pd.DataFrame, 
     )
 
 
+def group_match_rows(group: str, matches: pd.DataFrame, teams: pd.DataFrame) -> pd.DataFrame:
+    team_groups = dict(zip(teams["team_id"], teams["group"]))
+    return matches[
+        (matches["stage"] == GROUP_STAGE)
+        & (matches["home_team"].map(team_groups) == group)
+        & (matches["away_team"].map(team_groups) == group)
+    ]
+
+
+def remaining_group_matches(group: str, matches: pd.DataFrame, results: pd.DataFrame, teams: pd.DataFrame) -> pd.DataFrame:
+    result_rows = score_lookup(results)
+    group_matches = group_match_rows(group, matches, teams)
+    return group_matches[
+        group_matches["match_id"].map(lambda match_id: completed_score(result_rows.get(str(match_id))) is None)
+    ]
+
+
+def group_standing_from_score_rows(
+    group: str,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    score_rows: dict[str, dict[str, Any]],
+    use_cards: bool,
+) -> pd.DataFrame:
+    ordered_team_ids, rows = ordered_group_rows_from_score_rows(group, teams, matches, score_rows, use_cards)
+    return pd.DataFrame([rows[team_id] for team_id in ordered_team_ids])[STANDING_COLUMNS].reset_index(drop=True)
+
+
+def ordered_group_rows_from_score_rows(
+    group: str,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    score_rows: dict[str, dict[str, Any]],
+    use_cards: bool,
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    rankings = {row["team_id"]: to_int(row["world_cup_ranking"], 9999) for _, row in teams.iterrows()}
+    group_teams = teams[teams["group"] == group]["team_id"].tolist()
+    rows = {
+        team_id: {
+            "team_id": team_id,
+            "games_played": 0,
+            "wins": 0,
+            "draws": 0,
+            "losses": 0,
+            "goals_for": 0,
+            "goals_against": 0,
+            "goal_difference": 0,
+            "fair_play_score": 0,
+            "points": 0,
+        }
+        for team_id in group_teams
+    }
+    group_matches = group_match_rows(group, matches, teams)
+
+    for _, match in group_matches.iterrows():
+        match_id = str(match["match_id"])
+        score = completed_score(score_rows.get(match_id))
+        if score is None:
+            continue
+
+        home_id = str(match["home_team"])
+        away_id = str(match["away_team"])
+        home_goals, away_goals = score
+
+        rows[home_id]["games_played"] += 1
+        rows[away_id]["games_played"] += 1
+        rows[home_id]["goals_for"] += home_goals
+        rows[home_id]["goals_against"] += away_goals
+        rows[away_id]["goals_for"] += away_goals
+        rows[away_id]["goals_against"] += home_goals
+
+        if home_goals > away_goals:
+            rows[home_id]["wins"] += 1
+            rows[home_id]["points"] += 3
+            rows[away_id]["losses"] += 1
+        elif home_goals < away_goals:
+            rows[away_id]["wins"] += 1
+            rows[away_id]["points"] += 3
+            rows[home_id]["losses"] += 1
+        else:
+            rows[home_id]["draws"] += 1
+            rows[away_id]["draws"] += 1
+            rows[home_id]["points"] += 1
+            rows[away_id]["points"] += 1
+
+        if use_cards:
+            card_row = score_rows.get(match_id, {})
+            rows[home_id]["fair_play_score"] += fair_play_delta(card_row, "home")
+            rows[away_id]["fair_play_score"] += fair_play_delta(card_row, "away")
+
+    table = pd.DataFrame(rows.values())
+    table["goal_difference"] = table["goals_for"] - table["goals_against"]
+    sorted_table = sort_group_table(table, group_matches, score_rows, rankings)
+    return [str(team_id) for team_id in sorted_table["team_id"]], {
+        str(row["team_id"]): row.to_dict()
+        for _, row in sorted_table.iterrows()
+    }
+
+
+def head_to_head_points_between(
+    team_id: str,
+    other_id: str,
+    group_matches: pd.DataFrame,
+    score_rows: dict[str, dict[str, Any]],
+) -> tuple[int, int] | None:
+    for _, match in group_matches.iterrows():
+        home_id = str(match["home_team"])
+        away_id = str(match["away_team"])
+        if {home_id, away_id} != {team_id, other_id}:
+            continue
+        score = completed_score(score_rows.get(str(match["match_id"])))
+        if score is None:
+            return None
+        home_goals, away_goals = score
+        if home_goals == away_goals:
+            return 1, 1
+        home_points, away_points = (3, 0) if home_goals > away_goals else (0, 3)
+        if team_id == home_id:
+            return home_points, away_points
+        return away_points, home_points
+    return None
+
+
+def group_lock_context(
+    group: str,
+    table: pd.DataFrame,
+    matches: pd.DataFrame,
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+) -> dict[str, Any]:
+    score_rows = score_lookup(results)
+    group_matches = group_match_rows(group, matches, teams)
+    team_ids = [str(team_id) for team_id in table["team_id"]]
+    points = {str(row["team_id"]): to_int(row["points"]) for _, row in table.iterrows()}
+    remaining_by_team = {team_id: 0 for team_id in team_ids}
+    for _, match in group_matches.iterrows():
+        if completed_score(score_rows.get(str(match["match_id"]))) is not None:
+            continue
+        remaining_by_team[str(match["home_team"])] += 1
+        remaining_by_team[str(match["away_team"])] += 1
+    max_points = {
+        team_id: points.get(team_id, 0) + 3 * remaining_by_team.get(team_id, 0)
+        for team_id in team_ids
+    }
+    return {
+        "group_matches": group_matches,
+        "score_rows": score_rows,
+        "team_ids": team_ids,
+        "points": points,
+        "max_points": max_points,
+    }
+
+
+def can_finish_above(team_id: str, other_id: str, context: dict[str, Any]) -> bool:
+    team_max = context["max_points"].get(team_id, 0)
+    other_points = context["points"].get(other_id, 0)
+    if team_max > other_points:
+        return True
+    if team_max < other_points:
+        return False
+
+    h2h = head_to_head_points_between(
+        team_id,
+        other_id,
+        context["group_matches"],
+        context["score_rows"],
+    )
+    if h2h is None:
+        return True
+    team_h2h_points, other_h2h_points = h2h
+    return team_h2h_points >= other_h2h_points
+
+
 def match_score_points_for_match(
     match: pd.Series,
     predicted_scores: dict[str, dict[str, Any]],
@@ -1993,20 +2322,28 @@ def match_score_points_for_match(
     pred_home, pred_away = predicted
     real_home, real_away = actual
     stage = str(match["stage"])
+    if stage != GROUP_STAGE:
+        return {
+            "winner_points": 0,
+            "home_goal_points": 0,
+            "away_goal_points": 0,
+            "total_points": 0,
+            "correct_winner": 0,
+            "exact_home": 0,
+            "exact_away": 0,
+            "exact_score": 0,
+        }
+
     correct_winner = 0
     if stage == GROUP_STAGE:
         correct_winner = int(score_side(pred_home, pred_away) == score_side(real_home, real_away))
-    elif stage in KNOCKOUT_STAGES:
-        predicted_winner_side = winner_side_from_resolved(predicted_resolved_rows.get(match_id))
-        actual_winner_side = winner_side_from_resolved(actual_resolved_rows.get(match_id))
-        correct_winner = int(bool(predicted_winner_side) and predicted_winner_side == actual_winner_side)
 
     exact_home = int(pred_home == real_home)
     exact_away = int(pred_away == real_away)
     exact_score = int(exact_home and exact_away)
-    winner_points = 3 * correct_winner
-    home_goal_points = exact_home
-    away_goal_points = exact_away
+    winner_points = MATCH_OUTCOME_POINTS * correct_winner
+    home_goal_points = MATCH_HOME_GOALS_POINTS * exact_home
+    away_goal_points = MATCH_AWAY_GOALS_POINTS * exact_away
     return {
         "winner_points": winner_points,
         "home_goal_points": home_goal_points,
@@ -2031,7 +2368,13 @@ def calculate_user_score_breakdown(
         teams, matches, user_predictions, knockout_matchups, third_place_combinations, use_cards=False
     )
     actual_state = derive_tournament_state(
-        teams, matches, actual_results, knockout_matchups, third_place_combinations, use_cards=True
+        teams,
+        matches,
+        actual_results,
+        knockout_matchups,
+        third_place_combinations,
+        use_cards=True,
+        require_confirmed_placements=True,
     )
     return calculate_user_score_breakdown_from_states(
         user_predictions, prediction_state, actual_results, actual_state, teams, matches
@@ -2045,6 +2388,7 @@ def calculate_user_score_breakdown_from_states(
     actual_state: dict[str, Any],
     teams: pd.DataFrame,
     matches: pd.DataFrame,
+    awarded_group_standings: set[str] | None = None,
 ) -> dict[str, int]:
     match_score_points = 0
     group_standings_points = 0
@@ -2073,28 +2417,30 @@ def calculate_user_score_breakdown_from_states(
     for group in GROUPS:
         if not group_is_complete(group, matches, actual_results, teams):
             continue
+        if awarded_group_standings is not None and group not in awarded_group_standings:
+            continue
         predicted_table = prediction_state["group_standings"][group]
         actual_table = actual_state["group_standings"][group]
         for position in range(min(len(predicted_table), len(actual_table))):
             if predicted_table.iloc[position]["team_id"] == actual_table.iloc[position]["team_id"]:
-                group_standings_points += 5
+                group_standings_points += GROUP_STANDING_POSITION_POINTS
 
-    for stage, stage_points in [
-        ("round_of_16", 5),
-        ("quarter_final", 10),
-        ("semi_final", 15),
-        ("final", 20),
-    ]:
+    for stage, stage_points in KNOCKOUT_STAGE_POINTS.items():
         actual_entrants = stage_entrants(actual_resolved, stage)
         if actual_entrants:
             knockout_progression_points += (
                 len(stage_entrants(predicted_resolved, stage) & actual_entrants) * stage_points
             )
 
-    predicted_winner = prediction_state["winners"].get("M104")
-    actual_winner = actual_state["winners"].get("M104")
+    predicted_third_place = prediction_state["winners"].get(THIRD_PLACE_MATCH_ID)
+    actual_third_place = actual_state["winners"].get(THIRD_PLACE_MATCH_ID)
+    if predicted_third_place and predicted_third_place == actual_third_place:
+        knockout_progression_points += THIRD_PLACE_WINNER_POINTS
+
+    predicted_winner = prediction_state["winners"].get(FINAL_MATCH_ID)
+    actual_winner = actual_state["winners"].get(FINAL_MATCH_ID)
     if predicted_winner and predicted_winner == actual_winner:
-        knockout_progression_points += 30
+        knockout_progression_points += CHAMPION_POINTS
 
     total_points = match_score_points + group_standings_points + knockout_progression_points
     return {
@@ -2418,6 +2764,50 @@ def advancing_team_ids_from_standings(
     return advancing_team_ids
 
 
+def group_qualification_statuses(
+    group_standings: dict[str, pd.DataFrame],
+    third_place: pd.DataFrame,
+    matches: pd.DataFrame,
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+) -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    advancing_team_ids = advancing_team_ids_from_standings(group_standings, third_place)
+    all_groups_complete = all(group_is_complete(group, matches, results, teams) for group in GROUPS)
+
+    for group, table in group_standings.items():
+        group_team_ids = [str(team_id) for team_id in table["team_id"]]
+        group_complete = group_is_complete(group, matches, results, teams)
+        if group_complete:
+            for position, team_id in enumerate(group_team_ids):
+                if position < 2:
+                    statuses[team_id] = "advanced"
+                elif all_groups_complete and team_id in advancing_team_ids:
+                    statuses[team_id] = "advanced"
+                elif position >= 3 or all_groups_complete:
+                    statuses[team_id] = "eliminated"
+            continue
+
+        context = group_lock_context(group, table, matches, results, teams)
+        for team_id in group_team_ids:
+            teams_that_can_finish_above = sum(
+                1
+                for other_id in context["team_ids"]
+                if other_id != team_id and can_finish_above(other_id, team_id, context)
+            )
+            teams_team_can_finish_above = sum(
+                1
+                for other_id in context["team_ids"]
+                if other_id != team_id and can_finish_above(team_id, other_id, context)
+            )
+            if teams_that_can_finish_above <= 1:
+                statuses[team_id] = "advanced"
+            elif teams_team_can_finish_above == 0:
+                statuses[team_id] = "eliminated"
+
+    return statuses
+
+
 def display_group_standings(group_standings: dict[str, pd.DataFrame], teams: pd.DataFrame) -> None:
     third_place = calculate_third_place_standings(group_standings, teams)
     advancing_team_ids = advancing_team_ids_from_standings(group_standings, third_place)
@@ -2430,7 +2820,12 @@ def display_group_standings(group_standings: dict[str, pd.DataFrame], teams: pd.
                 display_advancing_legend()
 
 
-def display_single_group_standing(table: pd.DataFrame, teams: pd.DataFrame, advancing_team_ids: set[str] | None = None) -> None:
+def display_single_group_standing(
+    table: pd.DataFrame,
+    teams: pd.DataFrame,
+    advancing_team_ids: set[str] | None = None,
+    qualification_statuses: dict[str, str] | None = None,
+) -> None:
     advancing_team_ids = advancing_team_ids or set()
     table = table.copy()
     table.insert(0, "pos", range(1, len(table) + 1))
@@ -2439,7 +2834,7 @@ def display_single_group_standing(table: pd.DataFrame, teams: pd.DataFrame, adva
         row_cells = (
             [
                 (str(row["pos"]), True),
-                (team_badge_html(row["team_id"], teams), False),
+                (team_badge_with_status_html(row["team_id"], teams, qualification_statuses), False),
                 (str(row["games_played"]), True),
                 (str(row["goals_for"]), True),
                 (str(row["goals_against"]), True),
@@ -2467,6 +2862,7 @@ def standings_rows(
     teams: pd.DataFrame,
     include_group: bool = False,
     advancing_team_ids: set[str] | None = None,
+    qualification_statuses: dict[str, str] | None = None,
 ) -> list[tuple[list[tuple[str, bool]], str]]:
     advancing_team_ids = advancing_team_ids or set()
     rows = []
@@ -2476,7 +2872,7 @@ def standings_rows(
             rendered_row.append((html.escape(str(row["group"])), True))
         rendered_row.extend(
             [
-                (team_badge_html(row["team_id"], teams), False),
+                (team_badge_with_status_html(row["team_id"], teams, qualification_statuses), False),
                 (str(row["games_played"]), True),
                 (str(row["goals_for"]), True),
                 (str(row["goals_against"]), True),
@@ -2488,7 +2884,12 @@ def standings_rows(
     return rows
 
 
-def display_third_place(third_place: pd.DataFrame, teams: pd.DataFrame, advancing_team_ids: set[str] | None = None) -> None:
+def display_third_place(
+    third_place: pd.DataFrame,
+    teams: pd.DataFrame,
+    advancing_team_ids: set[str] | None = None,
+    qualification_statuses: dict[str, str] | None = None,
+) -> None:
     table = third_place.copy()
     table.insert(0, "rank", range(1, len(table) + 1))
     render_html_table(
@@ -2502,7 +2903,13 @@ def display_third_place(third_place: pd.DataFrame, teams: pd.DataFrame, advancin
             ("Goal\ndifference", True),
             ("Points", True, "points-column"),
         ],
-        standings_rows(table.head(12), teams, include_group=True, advancing_team_ids=advancing_team_ids),
+        standings_rows(
+            table.head(12),
+            teams,
+            include_group=True,
+            advancing_team_ids=advancing_team_ids,
+            qualification_statuses=qualification_statuses,
+        ),
         table_class="third-place-table",
     )
 
@@ -2751,6 +3158,25 @@ def render_readonly_results_inputs(
 ) -> None:
     group_by_team = dict(zip(teams["team_id"], teams["group"]))
     advancing_team_ids = advancing_team_ids_from_standings(group_standings, third_place)
+    result_rows = []
+    for _, match in matches.iterrows():
+        resolved_row = resolved.loc[match["match_id"]].to_dict() if match["match_id"] in resolved.index else {}
+        result_rows.append(
+            {
+                "match_id": match["match_id"],
+                "home_goals": resolved_row.get("home_goals", ""),
+                "away_goals": resolved_row.get("away_goals", ""),
+                PENALTY_WINNER_COLUMN: resolved_row.get("winner", ""),
+            }
+        )
+    scoped_results = pd.DataFrame(result_rows)
+    qualification_statuses = group_qualification_statuses(
+        group_standings,
+        third_place,
+        matches,
+        scoped_results,
+        teams,
+    )
 
     for group in GROUPS:
         group_matches = matches[
@@ -2768,11 +3194,21 @@ def render_readonly_results_inputs(
                     render_readonly_match(match, resolved, teams)
             with table_col:
                 st.markdown(f"**Group {group} Standings**")
-                display_single_group_standing(group_standings[group], teams, advancing_team_ids)
+                display_single_group_standing(
+                    group_standings[group],
+                    teams,
+                    advancing_team_ids,
+                    qualification_statuses=qualification_statuses,
+                )
                 display_advancing_legend()
 
     st.markdown("#### Third-Place Ranking")
-    display_third_place(third_place, teams, advancing_team_ids)
+    display_third_place(
+        third_place,
+        teams,
+        advancing_team_ids,
+        qualification_statuses=qualification_statuses,
+    )
     display_advancing_legend()
     st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
 
@@ -3010,11 +3446,25 @@ def render_results(
     third_place_combinations: pd.DataFrame,
 ) -> None:
     st.header("Results")
-    state = derive_tournament_state(teams, matches, results, knockout_matchups, third_place_combinations, use_cards=True)
+    state = derive_tournament_state(
+        teams,
+        matches,
+        results,
+        knockout_matchups,
+        third_place_combinations,
+        use_cards=True,
+        require_confirmed_placements=True,
+    )
     write_actual_standings(state)
     st.subheader("Group Stage")
     resolved = state["resolved_matches"].set_index("match_id")
-    render_readonly_results_inputs(matches, resolved, teams, state["group_standings"], state["third_place"])
+    render_readonly_results_inputs(
+        matches,
+        resolved,
+        teams,
+        state["group_standings"],
+        state["third_place"],
+    )
 
 
 def render_rules() -> None:
@@ -3022,33 +3472,30 @@ def render_rules() -> None:
     st.subheader("Scoring")
     st.markdown('<div class="rules-phase-heading">Group Phase</div>', unsafe_allow_html=True)
     st.markdown(
-        """
-        | Category | Points |
-        |---|---:|
-        | **Per match** |  |
-        | &nbsp;&nbsp;&nbsp;Correct winner/draw per match | 3 |
-        | &nbsp;&nbsp;&nbsp;Correct home-team goals per match | 1 |
-        | &nbsp;&nbsp;&nbsp;Correct away-team goals per match | 1 |
-        | **Final group standings** |  |
-        | &nbsp;&nbsp;&nbsp;Correct final group placement per team | 5 |
+        f"""
+        | Category | Points | Added when |
+        |---|---:|---|
+        | **Per match** |  |  |
+        | &nbsp;&nbsp;&nbsp;Correct winner/draw per match | {MATCH_OUTCOME_POINTS} | Match is completed |
+        | &nbsp;&nbsp;&nbsp;Correct home-team goals per match | {MATCH_HOME_GOALS_POINTS} | Match is completed |
+        | &nbsp;&nbsp;&nbsp;Correct away-team goals per match | {MATCH_AWAY_GOALS_POINTS} | Match is completed |
+        | **Final group standings** |  |  |
+        | &nbsp;&nbsp;&nbsp;Correct final group placement per team | {GROUP_STANDING_POSITION_POINTS} | All matches in that group are complete |
         """
     )
     st.markdown('<div class="rules-phase-heading rules-phase-heading-spaced">Knockout Phase</div>', unsafe_allow_html=True)
     st.markdown(
-        """
+        f"""
 
-        | Category | Points |
-        |---|---:|
-        | **Per match** |  |
-        | &nbsp;&nbsp;&nbsp;Correct winner side, home/away, per match | 3 |
-        | &nbsp;&nbsp;&nbsp;Correct home-team goals per match | 1 |
-        | &nbsp;&nbsp;&nbsp;Correct away-team goals per match | 1 |
-        | **End results** |  |
-        | &nbsp;&nbsp;&nbsp;Correct World Cup winner | 30 |
-        | &nbsp;&nbsp;&nbsp;Correct finalist, per team | 20 |
-        | &nbsp;&nbsp;&nbsp;Correct semi-finalist, per team | 15 |
-        | &nbsp;&nbsp;&nbsp;Correct quarter-finalist, per team | 10 |
-        | &nbsp;&nbsp;&nbsp;Correct round-of-16 team, per team | 5 |
+        | Category | Points | Added when |
+        |---|---:|---|
+        | **Progression** |  |  |
+        | &nbsp;&nbsp;&nbsp;Correct round-of-16 team, per team | {KNOCKOUT_STAGE_POINTS["round_of_16"]} | Team advances from the round of 32 |
+        | &nbsp;&nbsp;&nbsp;Correct quarter-finalist, per team | {KNOCKOUT_STAGE_POINTS["quarter_final"]} | Team advances from the round of 16 |
+        | &nbsp;&nbsp;&nbsp;Correct semi-finalist, per team | {KNOCKOUT_STAGE_POINTS["semi_final"]} | Team advances from the quarter-finals |
+        | &nbsp;&nbsp;&nbsp;Correct finalist, per team | {KNOCKOUT_STAGE_POINTS["final"]} | Team advances from the semi-finals |
+        | &nbsp;&nbsp;&nbsp;Correct third-place winner | {THIRD_PLACE_WINNER_POINTS} | Third-place match is completed |
+        | &nbsp;&nbsp;&nbsp;Correct World Cup winner | {CHAMPION_POINTS} | Final is completed |
         """
     )
     st.markdown('<div class="rules-section-gap"></div>', unsafe_allow_html=True)
@@ -3176,6 +3623,7 @@ def leaderboard_snapshot(
     matches: pd.DataFrame,
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
+    awarded_group_standings: set[str] | None = None,
 ) -> pd.DataFrame:
     columns = [
         "rank",
@@ -3194,14 +3642,26 @@ def leaderboard_snapshot(
     ]
     rows = []
     actual_state = derive_tournament_state(
-        teams, matches, results, knockout_matchups, third_place_combinations, use_cards=True
+        teams,
+        matches,
+        results,
+        knockout_matchups,
+        third_place_combinations,
+        use_cards=True,
+        require_confirmed_placements=True,
     )
     for participant in participants:
         prediction_state = derive_tournament_state(
             teams, matches, participant["predictions"], knockout_matchups, third_place_combinations, use_cards=False
         )
         breakdown = calculate_user_score_breakdown_from_states(
-            participant["predictions"], prediction_state, results, actual_state, teams, matches
+            participant["predictions"],
+            prediction_state,
+            results,
+            actual_state,
+            teams,
+            matches,
+            awarded_group_standings=awarded_group_standings,
         )
         rows.append(
             {
@@ -3227,6 +3687,47 @@ def completed_match_options(results: pd.DataFrame, matches: pd.DataFrame, teams:
         home_name = team_name(match.get("home_team", ""), teams)
         away_name = team_name(match.get("away_team", ""), teams)
         options.append((match_id, f"{match_id}: {home_name} {score[0]}-{score[1]} {away_name}"))
+    return options
+
+
+def leaderboard_checkpoint_options(
+    results: pd.DataFrame, matches: pd.DataFrame, teams: pd.DataFrame
+) -> list[dict[str, Any]]:
+    result_rows = score_lookup(results)
+    final_match_ids = group_final_match_ids(matches, teams)
+    final_match_groups = {match_id: group for group, match_id in final_match_ids.items()}
+    awarded_groups: set[str] = set()
+    options: list[dict[str, Any]] = []
+
+    for _, match in matches.iterrows():
+        match_id = str(match["match_id"])
+        score = completed_score(result_rows.get(match_id))
+        if score is None:
+            continue
+
+        home_name = team_name(match.get("home_team", ""), teams)
+        away_name = team_name(match.get("away_team", ""), teams)
+        options.append(
+            {
+                "checkpoint_id": f"match:{match_id}",
+                "through_match_id": match_id,
+                "label": f"{match_id}: {home_name} {score[0]}-{score[1]} {away_name}",
+                "awarded_group_standings": set(awarded_groups),
+            }
+        )
+
+        group = final_match_groups.get(match_id, "")
+        if group and group_is_complete(group, matches, results, teams):
+            awarded_groups.add(group)
+            options.append(
+                {
+                    "checkpoint_id": f"group:{group}",
+                    "through_match_id": match_id,
+                    "label": f"Final Standing Group {group}",
+                    "awarded_group_standings": set(awarded_groups),
+                }
+            )
+
     return options
 
 
@@ -3261,6 +3762,60 @@ def snapshot_with_rank_change(
         previous_results = results_through_match(results, matches, match_ids[selected_index - 1])
         previous = leaderboard_snapshot(
             participants, previous_results, teams, matches, knockout_matchups, third_place_combinations
+        )
+        previous_ranks = dict(zip(previous["user_id"], previous["rank"]))
+    current["rank_change"] = current.apply(
+        lambda row: format_change(to_int(row["rank"]), previous_ranks.get(row["user_id"])), axis=1
+    )
+    return current
+
+
+def snapshot_with_checkpoint_rank_change(
+    participants: list[dict[str, Any]],
+    results: pd.DataFrame,
+    matches: pd.DataFrame,
+    selected_checkpoint_id: str,
+    checkpoints: list[dict[str, Any]],
+    teams: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+) -> pd.DataFrame:
+    checkpoint_lookup = {checkpoint["checkpoint_id"]: checkpoint for checkpoint in checkpoints}
+    current_checkpoint = checkpoint_lookup[selected_checkpoint_id]
+    current_results = results_through_match(
+        results, matches, str(current_checkpoint["through_match_id"])
+    )
+    current = leaderboard_snapshot(
+        participants,
+        current_results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+        awarded_group_standings=set(current_checkpoint["awarded_group_standings"]),
+    )
+    selected_index = next(
+        (
+            index
+            for index, checkpoint in enumerate(checkpoints)
+            if checkpoint["checkpoint_id"] == selected_checkpoint_id
+        ),
+        -1,
+    )
+    previous_ranks = {}
+    if selected_index > 0:
+        previous_checkpoint = checkpoints[selected_index - 1]
+        previous_results = results_through_match(
+            results, matches, str(previous_checkpoint["through_match_id"])
+        )
+        previous = leaderboard_snapshot(
+            participants,
+            previous_results,
+            teams,
+            matches,
+            knockout_matchups,
+            third_place_combinations,
+            awarded_group_standings=set(previous_checkpoint["awarded_group_standings"]),
         )
         previous_ranks = dict(zip(previous["user_id"], previous["rank"]))
     current["rank_change"] = current.apply(
@@ -3580,27 +4135,32 @@ def render_default_leaderboard(
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
 ) -> None:
-    options = completed_match_options(results, matches, teams)
-    if not options:
+    checkpoints = leaderboard_checkpoint_options(results, matches, teams)
+    if not checkpoints:
         st.info("The leaderboard will appear once the first match has been played.")
         return
-    selected_match_id = options[-1][0]
-    sorted_options = sorted(options, key=lambda item: item[1].lower())
-    labels = [label for _, label in sorted_options]
-    selected_index = next(
-        (index for index, (match_id, _) in enumerate(sorted_options) if match_id == selected_match_id),
-        len(sorted_options) - 1,
-    )
+    selected_checkpoint_id = checkpoints[-1]["checkpoint_id"]
+    labels = [checkpoint["label"] for checkpoint in checkpoints]
+    selected_index = len(checkpoints) - 1
     selected_label = st.selectbox(
-        "Show leaderboard after match",
+        "Show leaderboard after",
         labels,
         index=selected_index,
         key="leaderboard_after_match",
     )
-    selected_match_id = dict((label, match_id) for match_id, label in sorted_options)[selected_label]
+    selected_checkpoint_id = {
+        checkpoint["label"]: checkpoint["checkpoint_id"] for checkpoint in checkpoints
+    }[selected_label]
     participants = leaderboard_participants(users, include_ai=False)
-    snapshot = snapshot_with_rank_change(
-        participants, results, matches, selected_match_id, teams, knockout_matchups, third_place_combinations
+    snapshot = snapshot_with_checkpoint_rank_change(
+        participants,
+        results,
+        matches,
+        selected_checkpoint_id,
+        checkpoints,
+        teams,
+        knockout_matchups,
+        third_place_combinations,
     )
     display_leaderboard_table(snapshot, include_change=True)
 
@@ -3729,12 +4289,16 @@ def per_match_score_options(
     results: pd.DataFrame,
     matches: pd.DataFrame,
     teams: pd.DataFrame,
+    stage_filter: list[str] | None = None,
 ) -> tuple[list[tuple[str, str]], int]:
     result_rows = score_lookup(results)
     options = []
     first_uncompleted_index = None
+    filtered_matches = matches
+    if stage_filter is not None:
+        filtered_matches = matches[matches["stage"].isin(stage_filter)]
 
-    for _, match in matches.iterrows():
+    for _, match in filtered_matches.iterrows():
         match_id = str(match["match_id"])
         home_team = team_name(match.get("home_team", ""), teams)
         away_team = team_name(match.get("away_team", ""), teams)
@@ -3754,6 +4318,334 @@ def per_match_score_options(
     return options, len(options) - 1
 
 
+def knockout_round_options() -> list[tuple[str, str]]:
+    return [
+        ("round_of_32", "Round of 32"),
+        ("round_of_16", "Round of 16"),
+        ("quarter_final", "Quarter-finals"),
+        ("semi_final", "Semi-finals"),
+        ("third_place", "Third-place match"),
+        ("final", "Final"),
+    ]
+
+
+def stage_results_complete(stage: str, results: pd.DataFrame, matches: pd.DataFrame) -> bool:
+    stage_matches = matches[matches["stage"].eq(stage)]
+    if stage_matches.empty:
+        return False
+    result_rows = score_lookup(results)
+    return all(
+        completed_score(result_rows.get(str(match_id))) is not None
+        for match_id in stage_matches["match_id"]
+    )
+
+
+def current_knockout_round_index(
+    options: list[tuple[str, str]], results: pd.DataFrame, matches: pd.DataFrame
+) -> int:
+    if not stage_results_complete(GROUP_STAGE, results, matches):
+        return 0
+    for index, (stage, _) in enumerate(options):
+        if not stage_results_complete(stage, results, matches):
+            return index
+    return max(0, len(options) - 1)
+
+
+def knockout_round_entrants_locked(stage: str, results: pd.DataFrame, matches: pd.DataFrame) -> bool:
+    previous_stage = {
+        "round_of_32": GROUP_STAGE,
+        "round_of_16": "round_of_32",
+        "quarter_final": "round_of_16",
+        "semi_final": "quarter_final",
+        "third_place": "semi_final",
+        "final": "semi_final",
+    }.get(stage)
+    return bool(previous_stage) and stage_results_complete(previous_stage, results, matches)
+
+
+def knockout_round_points(stage: str) -> int:
+    if stage == "round_of_32":
+        return KNOCKOUT_STAGE_POINTS["round_of_16"]
+    if stage == "round_of_16":
+        return KNOCKOUT_STAGE_POINTS["quarter_final"]
+    if stage == "quarter_final":
+        return KNOCKOUT_STAGE_POINTS["semi_final"]
+    if stage == "semi_final":
+        return KNOCKOUT_STAGE_POINTS["final"]
+    if stage == "third_place":
+        return THIRD_PLACE_WINNER_POINTS
+    if stage == "final":
+        return CHAMPION_POINTS
+    return 0
+
+
+def knockout_round_advancement_label(stage: str) -> str:
+    labels = {
+        "round_of_32": "Predicted to reach Round of 16",
+        "round_of_16": "Predicted to reach quarter-finals",
+        "quarter_final": "Predicted to reach semi-finals",
+        "semi_final": "Predicted to reach final",
+        "third_place": "Predicted third-place winner",
+        "final": "Predicted champion",
+    }
+    return labels.get(stage, "Predicted to advance")
+
+
+def knockout_result_text(row: dict[str, Any] | pd.Series | None, teams: pd.DataFrame) -> str:
+    if row is None:
+        return "-"
+    home_id = str(row.get("home_team", "")).strip()
+    away_id = str(row.get("away_team", "")).strip()
+    if not home_id or not away_id:
+        return "-"
+    score = completed_score(row)
+    if score is None:
+        return f"{team_name(home_id, teams)} vs {team_name(away_id, teams)}"
+    home_goals, away_goals = score
+    text = f"{team_name(home_id, teams)} {home_goals}-{away_goals} {team_name(away_id, teams)}"
+    if home_goals == away_goals:
+        winner_id = str(row.get("winner", "")).strip()
+        if winner_id:
+            text = f"{text}, {team_name(winner_id, teams)} on penalties"
+    return text
+
+
+def knockout_winner_first_result_text(row: dict[str, Any] | pd.Series | None, teams: pd.DataFrame) -> str:
+    if row is None:
+        return "-"
+    home_id = str(row.get("home_team", "")).strip()
+    away_id = str(row.get("away_team", "")).strip()
+    if not home_id or not away_id:
+        return "-"
+    score = completed_score(row)
+    winner_id = str(row.get("winner", "")).strip()
+    if not winner_id or score is None:
+        return knockout_result_text(row, teams)
+
+    loser_id = away_id if winner_id == home_id else home_id
+    winner_goals, loser_goals = score if winner_id == home_id else (score[1], score[0])
+    text = f"{team_name(winner_id, teams)} {winner_goals}-{loser_goals} {team_name(loser_id, teams)}"
+    if score[0] == score[1]:
+        text = f"{text}, {team_name(winner_id, teams)} on penalties"
+    return text
+
+
+def knockout_team_progress_status(
+    team_id: str,
+    actual_round_rows: pd.DataFrame,
+    entrants_locked: bool,
+    qualification_statuses: dict[str, str] | None = None,
+) -> str:
+    for _, row in actual_round_rows.iterrows():
+        home_id = str(row.get("home_team", "")).strip()
+        away_id = str(row.get("away_team", "")).strip()
+        if not home_id or not away_id:
+            continue
+        winner_id = str(row.get("winner", "")).strip()
+        if team_id in {home_id, away_id}:
+            if not winner_id:
+                return "pending"
+            return "advanced" if winner_id == team_id else "eliminated"
+    group_status = (qualification_statuses or {}).get(str(team_id), "")
+    if group_status == "eliminated":
+        return "eliminated"
+    return "eliminated" if entrants_locked else "pending"
+
+
+def predicted_team_progress_html(
+    team_ids: list[str],
+    teams: pd.DataFrame,
+    actual_round_rows: pd.DataFrame,
+    entrants_locked: bool,
+    qualification_statuses: dict[str, str] | None = None,
+) -> str:
+    if not team_ids:
+        return "-"
+    labels = sorted((team_name(team_id, teams), team_id) for team_id in team_ids)
+    chips = []
+    for label, team_id in labels:
+        status = knockout_team_progress_status(
+            team_id,
+            actual_round_rows,
+            entrants_locked,
+            qualification_statuses,
+        )
+        chips.append(
+            f'<span class="team-progress-chip {status}">{html.escape(label)}</span>'
+        )
+    return f'<div class="team-progress-list">{"".join(chips)}</div>'
+
+
+def render_knockout_progression_table(
+    rows: list[dict[str, str]],
+    detail_rows: dict[str, list[str]],
+    advancement_label: str,
+) -> None:
+    if not rows:
+        st.info("No predictions available.")
+        return
+
+    headers = ["User name", "Correct", "Points earned", advancement_label, "Predicted results"]
+    header_html = "".join(
+        f'<th class="{" ".join(["left" if header in {"User name", advancement_label, "Predicted results"} else "", "bold" if header == "Points earned" else ""]).strip()}">{html.escape(header)}</th>'
+        for header in headers
+    )
+    body_rows = []
+    for row in rows:
+        user_name = row["User name"]
+        details = detail_rows.get(user_name, [])
+        details_html = "<br>".join(html.escape(detail) for detail in details) or "-"
+        cells = [
+            f'<td class="left">{html.escape(user_name)}</td>',
+            f"<td>{html.escape(row['Correct'])}</td>",
+            f'<td class="bold">{html.escape(row["Points earned"])}</td>',
+            f'<td class="left">{row.get("_advancement_html", html.escape(row[advancement_label]))}</td>',
+            (
+                '<td class="left">'
+                "<details>"
+                "<summary>Show predicted results</summary>"
+                f'<div class="knockout-detail-results">{details_html}</div>'
+                "</details>"
+                "</td>"
+            ),
+        ]
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    st.markdown(
+        (
+            '<table class="leaderboard-table knockout-progression-table">'
+            f"<thead><tr>{header_html}</tr></thead>"
+            f"<tbody>{''.join(body_rows)}</tbody>"
+            "</table>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_knockout_progression_scores(
+    participants: list[dict[str, Any]],
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+) -> None:
+    options = knockout_round_options()
+    labels = [label for _, label in options]
+    default_round_index = current_knockout_round_index(options, results, matches)
+    selected_label = st.selectbox(
+        "Knockout round",
+        labels,
+        index=default_round_index,
+        key="per_match_knockout_stage",
+    )
+    selected_stage = dict((label, stage) for stage, label in options)[selected_label]
+    round_matches = matches[matches["stage"].eq(selected_stage)]
+    if round_matches.empty:
+        st.info("No matches are available for this knockout round.")
+        return
+
+    actual_state = derive_tournament_state(
+        teams,
+        matches,
+        results,
+        knockout_matchups,
+        third_place_combinations,
+        use_cards=True,
+        require_confirmed_placements=True,
+    )
+    actual_winners = {
+        winner
+        for match_id, winner in actual_state["winners"].items()
+        if match_id in set(round_matches["match_id"]) and winner
+    }
+    actual_round_rows = actual_state["resolved_matches"][
+        actual_state["resolved_matches"]["stage"].eq(selected_stage)
+    ]
+    qualification_statuses = group_qualification_statuses(
+        actual_state["group_standings"],
+        actual_state["third_place"],
+        matches,
+        results,
+        teams,
+    )
+    entrants_locked = knockout_round_entrants_locked(selected_stage, results, matches)
+    stage_points = knockout_round_points(selected_stage)
+    advancement_label = knockout_round_advancement_label(selected_stage)
+
+    rows = []
+    detail_rows: dict[str, list[str]] = {}
+    predicted_counts: dict[str, int] = {}
+    for participant in participants:
+        prediction_state = derive_tournament_state(
+            teams,
+            matches,
+            participant["predictions"],
+            knockout_matchups,
+            third_place_combinations,
+            use_cards=False,
+        )
+        predicted_resolved_rows = score_lookup(prediction_state["resolved_matches"])
+        predicted_winners = [
+            prediction_state["winners"].get(str(match_id), "")
+            for match_id in round_matches["match_id"]
+        ]
+        predicted_winners = [winner for winner in predicted_winners if winner]
+        for winner in predicted_winners:
+            predicted_counts[winner] = predicted_counts.get(winner, 0) + 1
+        predicted_winner_set = set(predicted_winners)
+        correct_count = len(predicted_winner_set & actual_winners) if actual_winners else 0
+        correct_display = f"{correct_count}/{len(actual_winners)}" if actual_winners else "-"
+        points_display = str(correct_count * stage_points) if actual_winners else "-"
+        predicted_team_names = ", ".join(
+            sorted(team_name(team_id, teams) for team_id in predicted_winners)
+        ) or "-"
+
+        rows.append(
+            {
+                "User name": participant["user_name"],
+                "Correct": correct_display,
+                "Points earned": points_display,
+                advancement_label: predicted_team_names,
+                "_advancement_html": predicted_team_progress_html(
+                    predicted_winners,
+                    teams,
+                    actual_round_rows,
+                    entrants_locked,
+                    qualification_statuses,
+                ),
+            }
+        )
+        detail_rows[participant["user_name"]] = [
+            result
+            for result in sorted(
+                knockout_winner_first_result_text(predicted_resolved_rows.get(str(match_id)), teams)
+                for match_id in round_matches["match_id"]
+            )
+        ]
+
+    render_knockout_progression_table(rows, detail_rows, advancement_label)
+
+    if participants and predicted_counts:
+        summary_rows = [
+            {
+                "Team": team_name(team_id, teams),
+                "Predictions": count,
+                "Percentage": f"{round(100 * count / len(participants), 1)}%",
+            }
+            for team_id, count in predicted_counts.items()
+        ]
+        summary_table = pd.DataFrame(summary_rows).sort_values(
+            ["Predictions", "Team"], ascending=[False, True]
+        )
+        st.subheader("Most Predicted Teams to Advance/Win")
+        render_centered_dataframe(
+            summary_table,
+            {"Team"},
+            bold_columns={"Percentage"},
+        )
+
+
 def render_per_match_scores(
     users: pd.DataFrame,
     results: pd.DataFrame,
@@ -3766,18 +4658,7 @@ def render_per_match_scores(
     ais = load_ai_predictions()
     human_names = sorted([participant["user_name"] for participant in humans], key=str.lower)
     ai_names = sorted([participant["user_name"] for participant in ais], key=str.lower)
-    match_options, default_match_index = per_match_score_options(results, matches, teams)
-    if not match_options:
-        st.info("No matches are available.")
-        return
-    match_labels = [label for _, label in match_options]
-    selected_match_label = st.selectbox(
-        "Match",
-        match_labels,
-        index=default_match_index,
-        key="per_match_match",
-    )
-    selected_match_id = dict((label, match_id) for match_id, label in match_options)[selected_match_label]
+    phase = st.selectbox("Phase", ["Group stage", "Knockout phase"], key="per_match_phase")
     user_col, ai_col = st.columns([0.6, 0.4])
     with user_col:
         selected_humans = st.multiselect("Users", human_names, default=human_names, key="per_match_users")
@@ -3788,6 +4669,31 @@ def render_per_match_scores(
         + [p for p in ais if p["user_name"] in selected_ais],
         key=lambda participant: participant["user_name"].lower(),
     )
+    if phase == "Knockout phase":
+        render_knockout_progression_scores(
+            participants,
+            results,
+            teams,
+            matches,
+            knockout_matchups,
+            third_place_combinations,
+        )
+        return
+
+    match_options, default_match_index = per_match_score_options(
+        results, matches, teams, stage_filter=[GROUP_STAGE]
+    )
+    if not match_options:
+        st.info("No group-stage matches are available.")
+        return
+    match_labels = [label for _, label in match_options]
+    selected_match_label = st.selectbox(
+        "Match",
+        match_labels,
+        index=default_match_index,
+        key="per_match_match",
+    )
+    selected_match_id = dict((label, match_id) for match_id, label in match_options)[selected_match_label]
     match = matches[matches["match_id"].eq(selected_match_id)].iloc[0]
     scoped_results = results_through_match(results, matches, selected_match_id)
     actual_rows = score_lookup(scoped_results)
@@ -3801,6 +4707,7 @@ def render_per_match_scores(
             knockout_matchups,
             third_place_combinations,
             use_cards=True,
+            require_confirmed_placements=True,
         )
         actual_resolved_rows = score_lookup(actual_state["resolved_matches"])
     rows = []
@@ -3843,7 +4750,7 @@ def render_per_match_scores(
     render_centered_dataframe(
         pd.DataFrame(rows),
         {"User name"},
-        bold_columns={"Actual score"},
+        bold_columns={"Points earned"},
     )
     if matchup_counts:
         st.subheader("Most Common Predicted Matchup")
@@ -3910,7 +4817,13 @@ def render_per_user_scores(
     prediction_resolved_rows = {}
     if phase == "Knockout phase":
         actual_state = derive_tournament_state(
-            teams, matches, results, knockout_matchups, third_place_combinations, use_cards=True
+            teams,
+            matches,
+            results,
+            knockout_matchups,
+            third_place_combinations,
+            use_cards=True,
+            require_confirmed_placements=True,
         )
         actual_resolved_rows = score_lookup(actual_state["resolved_matches"])
         prediction_states = {
@@ -4245,16 +5158,38 @@ def render_endgame_scenarios(
     snapshot = snapshot_with_rank_change(
         participants, results, matches, completed_ids[-1], teams, knockout_matchups, third_place_combinations
     )
-    actual_state = derive_tournament_state(teams, matches, results, knockout_matchups, third_place_combinations, use_cards=True)
-    remaining_matches = len(matches) - len(completed_ids)
+    actual_state = derive_tournament_state(
+        teams,
+        matches,
+        results,
+        knockout_matchups,
+        third_place_combinations,
+        use_cards=True,
+        require_confirmed_placements=True,
+    )
+    result_rows = score_lookup(results)
+    remaining_group_matches = sum(
+        1
+        for _, match in matches[matches["stage"].eq(GROUP_STAGE)].iterrows()
+        if completed_score(result_rows.get(match["match_id"])) is None
+    )
     incomplete_groups = sum(0 if group_is_complete(group, matches, results, teams) else 1 for group in GROUPS)
+    teams_per_group = int(teams.groupby("group").size().max()) if not teams.empty else 0
     future_stage_bonus = 0
-    for stage, stage_points in [("round_of_16", 5), ("quarter_final", 10), ("semi_final", 15), ("final", 20)]:
-        if not stage_entrants(actual_state["resolved_matches"], stage):
-            future_stage_bonus += len(matches[matches["stage"].eq(stage)]) * 2 * stage_points
-    if not actual_state["winners"].get("M104"):
-        future_stage_bonus += 30
-    remaining_possible = remaining_matches * 5 + incomplete_groups * 20 + future_stage_bonus
+    for stage, stage_points in KNOCKOUT_STAGE_POINTS.items():
+        expected_entrants = len(matches[matches["stage"].eq(stage)]) * 2
+        known_entrants = len(stage_entrants(actual_state["resolved_matches"], stage))
+        future_stage_bonus += max(0, expected_entrants - known_entrants) * stage_points
+    if not actual_state["winners"].get(THIRD_PLACE_MATCH_ID):
+        future_stage_bonus += THIRD_PLACE_WINNER_POINTS
+    if not actual_state["winners"].get(FINAL_MATCH_ID):
+        future_stage_bonus += CHAMPION_POINTS
+    max_group_match_points = MATCH_OUTCOME_POINTS + MATCH_HOME_GOALS_POINTS + MATCH_AWAY_GOALS_POINTS
+    remaining_possible = (
+        remaining_group_matches * max_group_match_points
+        + incomplete_groups * teams_per_group * GROUP_STANDING_POSITION_POINTS
+        + future_stage_bonus
+    )
     leader_points = int(snapshot["total_points"].max()) if not snapshot.empty else 0
     rows = []
     for _, row in snapshot.iterrows():
@@ -4324,6 +5259,7 @@ def render_leaderboard(
 
 def main() -> None:
     st.set_page_config(page_title="World Cup 2026 Pool", layout="wide")
+    clear_stale_streamlit_cache()
     apply_visual_theme()
     ensure_data_files()
 
