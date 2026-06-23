@@ -112,7 +112,7 @@ CARD_COLUMNS = [
     "away_indirect_red_cards",
     "away_direct_red_cards",
 ]
-CACHE_SCHEMA_VERSION = "confirmed-placement-v5"
+CACHE_SCHEMA_VERSION = "blank-score-widgets-v8"
 
 
 DEFAULT_THEME = {
@@ -904,6 +904,7 @@ def apply_visual_theme() -> None:
 def clear_stale_streamlit_cache() -> None:
     if st.session_state.get("cache_schema_version") == CACHE_SCHEMA_VERSION:
         return
+    st.cache_data.clear()
     st.session_state["cache_schema_version"] = CACHE_SCHEMA_VERSION
 
 
@@ -1327,8 +1328,8 @@ def restore_prediction_widgets(predictions: pd.DataFrame, matches: pd.DataFrame,
         row = existing_lookup.get(match_id)
         home = None if row is None else optional_natural(row["home_goals"])
         away = None if row is None else optional_natural(row["away_goals"])
-        st.session_state[f"pred_home_{match_id}"] = 0 if home is None else home
-        st.session_state[f"pred_away_{match_id}"] = 0 if away is None else away
+        st.session_state[f"pred_home_{match_id}"] = home
+        st.session_state[f"pred_away_{match_id}"] = away
         st.session_state[f"pred_penalty_{match_id}"] = (
             "" if row is None else str(row.get(PENALTY_WINNER_COLUMN, "")).strip()
         )
@@ -1897,14 +1898,17 @@ def confirmed_group_position_slots(
             continue
 
         context = group_lock_context(group, table, matches, score_df, teams)
-        for position, row in enumerate(table.head(3).itertuples(index=False)):
-            team_id = str(getattr(row, "team_id"))
-            teams_that_can_finish_above = sum(
-                1
-                for other_id in context["team_ids"]
-                if other_id != team_id and can_finish_above(other_id, team_id, context)
+        ordered_team_ids = [str(team_id) for team_id in table["team_id"]]
+        for position, team_id in enumerate(ordered_team_ids[:3]):
+            teams_above = ordered_team_ids[:position]
+            teams_below = ordered_team_ids[position + 1 :]
+            can_overtake_team_above = any(
+                can_finish_above(team_id, other_id, context) for other_id in teams_above
             )
-            if teams_that_can_finish_above == position:
+            can_be_overtaken_by_team_below = any(
+                can_finish_above(other_id, team_id, context) for other_id in teams_below
+            )
+            if not can_overtake_team_above and not can_be_overtaken_by_team_below:
                 confirmed_slots.add(f"{position + 1}{group}")
 
     return confirmed_slots
@@ -2964,7 +2968,7 @@ def group_prediction_is_complete(matches: pd.DataFrame) -> bool:
     return True
 
 
-def guard_knockout_prediction(field_key: str, group_match_ids: list[str], reset_value: Any = 0) -> None:
+def guard_knockout_prediction(field_key: str, group_match_ids: list[str], reset_value: Any = None) -> None:
     for match_id in group_match_ids:
         home = optional_natural(st.session_state.get(f"pred_home_{match_id}", ""))
         away = optional_natural(st.session_state.get(f"pred_away_{match_id}", ""))
@@ -2991,7 +2995,7 @@ def render_group_required_dialog() -> None:
 
 def normalize_prediction_widget_value(key: str) -> None:
     value = optional_natural(st.session_state.get(key, ""))
-    st.session_state[key] = 0 if value is None else value
+    st.session_state[key] = value
 
 
 def group_predictions_are_complete(group_match_ids: list[str]) -> bool:
@@ -3015,7 +3019,7 @@ def render_goal_control(
         min_value=0,
         max_value=99,
         step=1,
-        value=0,
+        value=None,
         format="%d",
         key=key,
         label_visibility=label_visibility,
@@ -3307,7 +3311,13 @@ def render_prediction_panel(
 
     predictions = make_score_df_from_session(matches, user_id)
     state = derive_tournament_state(
-        teams, matches, predictions, knockout_matchups, third_place_combinations, use_cards=False
+        teams,
+        matches,
+        predictions,
+        knockout_matchups,
+        third_place_combinations,
+        use_cards=False,
+        require_confirmed_placements=True,
     )
 
     st.subheader("Group Stage")
