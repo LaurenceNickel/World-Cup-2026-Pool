@@ -4433,6 +4433,20 @@ def current_knockout_round_index(
     return max(0, len(options) - 1)
 
 
+def default_per_match_phase_index(results: pd.DataFrame, matches: pd.DataFrame) -> int:
+    return 1 if stage_results_complete(GROUP_STAGE, results, matches) else 0
+
+
+def sync_default_per_match_phase(results: pd.DataFrame, matches: pd.DataFrame, phase_options: list[str]) -> int:
+    default_index = default_per_match_phase_index(results, matches)
+    default_phase = phase_options[default_index]
+    default_state_key = "per_match_phase_default"
+    if st.session_state.get(default_state_key) != default_phase:
+        st.session_state["per_match_phase"] = default_phase
+        st.session_state[default_state_key] = default_phase
+    return default_index
+
+
 def knockout_round_entrants_locked(stage: str, results: pd.DataFrame, matches: pd.DataFrame) -> bool:
     previous_stage = {
         "round_of_32": GROUP_STAGE,
@@ -4740,7 +4754,13 @@ def render_per_match_scores(
     ais = load_ai_predictions()
     human_names = sorted([participant["user_name"] for participant in humans], key=str.lower)
     ai_names = sorted([participant["user_name"] for participant in ais], key=str.lower)
-    phase = st.selectbox("Phase", ["Group stage", "Knockout phase"], key="per_match_phase")
+    phase_options = ["Group stage", "Knockout phase"]
+    phase = st.selectbox(
+        "Phase",
+        phase_options,
+        index=sync_default_per_match_phase(results, matches, phase_options),
+        key="per_match_phase",
+    )
     user_col, ai_col = st.columns([0.6, 0.4])
     with user_col:
         selected_humans = st.multiselect("Users", human_names, default=human_names, key="per_match_users")
