@@ -62,6 +62,15 @@ KNOCKOUT_STAGES = [
     "final",
 ]
 STAGES = [GROUP_STAGE, *KNOCKOUT_STAGES]
+STAGE_LABELS = {
+    GROUP_STAGE: "Group stage",
+    "round_of_32": "Round of 32",
+    "round_of_16": "Round of 16",
+    "quarter_final": "Quarter-final",
+    "semi_final": "Semi-final",
+    "third_place": "Third place",
+    "final": "Final",
+}
 GROUP_STANDING_POSITION_POINTS = 2
 MATCH_OUTCOME_POINTS = 3
 MATCH_HOME_GOALS_POINTS = 1
@@ -1593,6 +1602,10 @@ def team_name(team_id: str | None, teams: pd.DataFrame) -> str:
         return "TBD"
     lookup = team_lookup(teams)
     return lookup.get(team_id, team_id)
+
+
+def stage_label(stage: str) -> str:
+    return STAGE_LABELS.get(str(stage), str(stage).replace("_", " ").title())
 
 
 def score_lookup(score_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
@@ -3705,12 +3718,55 @@ def completed_match_options(results: pd.DataFrame, matches: pd.DataFrame, teams:
     return options
 
 
+def checkpoint_match_label(
+    match: pd.Series,
+    score: tuple[int, int],
+    teams: pd.DataFrame,
+    resolved_rows: dict[str, dict[str, Any]],
+    matchup_rows: dict[str, dict[str, Any]],
+) -> str:
+    match_id = str(match["match_id"])
+    stage = str(match.get("stage", ""))
+    resolved = resolved_rows.get(match_id, {})
+    matchup = matchup_rows.get(match_id, {})
+
+    home_id = str(resolved.get("home_team", "") or match.get("home_team", "")).strip()
+    away_id = str(resolved.get("away_team", "") or match.get("away_team", "")).strip()
+    home_fallback = str(matchup.get("home_team", "")).strip() or "TBD"
+    away_fallback = str(matchup.get("away_team", "")).strip() or "TBD"
+    home_name = team_name(home_id, teams) if home_id else home_fallback
+    away_name = team_name(away_id, teams) if away_id else away_fallback
+
+    return f"{stage_label(stage)}: {home_name} {score[0]}-{score[1]} {away_name}"
+
+
 def leaderboard_checkpoint_options(
-    results: pd.DataFrame, matches: pd.DataFrame, teams: pd.DataFrame
+    results: pd.DataFrame,
+    matches: pd.DataFrame,
+    teams: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
 ) -> list[dict[str, Any]]:
     result_rows = score_lookup(results)
     final_match_ids = group_final_match_ids(matches, teams)
     final_match_groups = {match_id: group for group, match_id in final_match_ids.items()}
+    state = derive_tournament_state(
+        teams,
+        matches,
+        results,
+        knockout_matchups,
+        third_place_combinations,
+        use_cards=True,
+        require_confirmed_placements=True,
+    )
+    resolved_rows = {
+        str(row["match_id"]): row.to_dict()
+        for _, row in state["resolved_matches"].iterrows()
+    }
+    matchup_rows = {
+        str(row["match_id"]): row.to_dict()
+        for _, row in knockout_matchups.iterrows()
+    }
     awarded_groups: set[str] = set()
     options: list[dict[str, Any]] = []
 
@@ -3720,13 +3776,11 @@ def leaderboard_checkpoint_options(
         if score is None:
             continue
 
-        home_name = team_name(match.get("home_team", ""), teams)
-        away_name = team_name(match.get("away_team", ""), teams)
         options.append(
             {
                 "checkpoint_id": f"match:{match_id}",
                 "through_match_id": match_id,
-                "label": f"{match_id}: {home_name} {score[0]}-{score[1]} {away_name}",
+                "label": checkpoint_match_label(match, score, teams, resolved_rows, matchup_rows),
                 "awarded_group_standings": set(awarded_groups),
             }
         )
@@ -4158,7 +4212,13 @@ def render_default_leaderboard(
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
 ) -> None:
-    checkpoints = leaderboard_checkpoint_options(results, matches, teams)
+    checkpoints = leaderboard_checkpoint_options(
+        results,
+        matches,
+        teams,
+        knockout_matchups,
+        third_place_combinations,
+    )
     if not checkpoints:
         st.info("The leaderboard will appear once the first match has been played.")
         return
