@@ -897,6 +897,24 @@ def apply_visual_theme() -> None:
             border-bottom: 0;
         }
 
+        .endgame-position-legend {
+            display: flex;
+            align-items: center;
+            gap: 0.55rem;
+            margin: 0.2rem 0 0.6rem;
+            color: var(--pool-primary);
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
+
+        .endgame-position-legend-bar {
+            width: min(16rem, 48vw);
+            height: 0.8rem;
+            border: 1px solid var(--pool-border);
+            border-radius: 999px;
+            background: linear-gradient(90deg, #f7fbff 0%, #deebf7 25%, #9ecae1 50%, #3182bd 75%, #08519c 100%);
+        }
+
         .pool-table tr:last-child td {
             border-bottom: 0;
         }
@@ -6254,16 +6272,16 @@ def render_endgame_position_heatmap(
         (str(row["User name"]), int(row["Position"])): float(row["Probability"])
         for row in probability_table.to_dict("records")
     }
-    headers = ["<th>User name</th>", *[f"<th>{position}</th>" for position in position_order]]
+    headers = ["<th>Final Rank</th>", *[f"<th>{position}</th>" for position in position_order]]
     rows = []
     for user_name in user_order:
         cells = [f"<td>{html.escape(user_name)}</td>"]
         for position in position_order:
             probability = probability_lookup.get((user_name, position), 0.0)
             intensity = max(0.0, min(1.0, probability / 100))
-            blue = int(245 - (143 * intensity))
-            green = int(249 - (113 * intensity))
-            red = int(247 - (240 * intensity))
+            red = int(247 - (239 * intensity))
+            green = int(251 - (170 * intensity))
+            blue = int(255 - (99 * intensity))
             text_color = "#ffffff" if probability >= 35 else DEFAULT_THEME["text"]
             cells.append(
                 f'<td style="background: rgb({red}, {green}, {blue}); color: {text_color};">'
@@ -6273,6 +6291,11 @@ def render_endgame_position_heatmap(
         rows.append(f"<tr>{''.join(cells)}</tr>")
 
     st.markdown(
+        '<div class="endgame-position-legend" aria-label="Probability color scale">'
+        "<span>0%</span>"
+        '<span class="endgame-position-legend-bar"></span>'
+        "<span>100%</span>"
+        "</div>"
         '<div class="endgame-position-scroll">'
         f'<table class="endgame-position-table"><thead><tr>{"".join(headers)}</tr></thead>'
         f'<tbody>{"".join(rows)}</tbody></table>'
