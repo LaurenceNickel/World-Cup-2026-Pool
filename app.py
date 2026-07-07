@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import hashlib
 import html
 import json
 import re
@@ -46,6 +47,7 @@ SHEET_BACKED_FILES = {
 CONFIG_SHEET = "config"
 DRAFTS_SHEET = "drafts"
 PREDICTIONS_SHEET = "predictions"
+LEADERBOARD_CACHE_SHEET = "leaderboard_snapshot_cache"
 
 
 class GoogleSheetsRateLimitError(RuntimeError):
@@ -949,6 +951,18 @@ def google_sheet_id() -> str:
     return value
 
 
+def google_sheets_target_label() -> str:
+    if not google_sheets_enabled():
+        return "Google Sheets disabled"
+    sheet_id = google_sheet_id()
+    sheet_hint = f"...{sheet_id[-8:]}" if sheet_id else "missing GOOGLE_SHEET_ID"
+    try:
+        title = str(getattr(sheets_workbook(), "title", "")).strip()
+    except Exception:
+        title = ""
+    return f"{title} ({sheet_hint})" if title else sheet_hint
+
+
 def is_google_sheets_rate_limit_error(error: Exception) -> bool:
     response = getattr(error, "response", None)
     status_code = getattr(response, "status_code", None)
@@ -1412,6 +1426,17 @@ def prediction_file(user_id: str) -> Path:
     return PREDICTIONS_DIR / f"predictions_{user_id}.csv"
 
 
+@st.cache_data
+def load_prediction_csv(path: Path, modified_time: float) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=PREDICTION_COLUMNS)
+    predictions = pd.read_csv(path, dtype=str).fillna("")
+    for column in PREDICTION_COLUMNS:
+        if column not in predictions.columns:
+            predictions[column] = ""
+    return predictions[PREDICTION_COLUMNS].copy()
+
+
 def load_user_predictions(user_id: str) -> pd.DataFrame:
     if google_sheets_enabled():
         predictions = read_sheet(PREDICTIONS_SHEET, tuple(PREDICTION_COLUMNS))
@@ -1422,11 +1447,7 @@ def load_user_predictions(user_id: str) -> pd.DataFrame:
     path = prediction_file(user_id)
     if not path.exists():
         return pd.DataFrame(columns=PREDICTION_COLUMNS)
-    predictions = pd.read_csv(path, dtype=str).fillna("")
-    for column in PREDICTION_COLUMNS:
-        if column not in predictions.columns:
-            predictions[column] = ""
-    return predictions[PREDICTION_COLUMNS].copy()
+    return load_prediction_csv(path, path.stat().st_mtime)
 
 
 def save_user_predictions(user_id: str, predictions: pd.DataFrame) -> None:
@@ -1611,7 +1632,7 @@ def stage_label(stage: str) -> str:
 def score_lookup(score_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
     if score_df.empty or "match_id" not in score_df.columns:
         return {}
-    return {str(row["match_id"]): row.to_dict() for _, row in score_df.iterrows()}
+    return {str(row["match_id"]): row for row in score_df.to_dict("records")}
 
 
 def make_score_df_from_session(matches: pd.DataFrame, user_id: str) -> pd.DataFrame:
@@ -1668,7 +1689,7 @@ def head_to_head_stats(
         for team_id in team_ids
     }
 
-    for _, match in group_matches.iterrows():
+    for match in group_matches.to_dict("records"):
         home_id = match["home_team"]
         away_id = match["away_team"]
         if home_id not in involved or away_id not in involved:
@@ -1768,7 +1789,17 @@ def sort_group_table(
     score_rows: dict[str, dict[str, Any]],
     rankings: dict[str, int],
 ) -> pd.DataFrame:
-    table_by_team = {row["team_id"]: row.to_dict() for _, row in table.iterrows()}
+    table_by_team = {str(row["team_id"]): row for row in table.to_dict("records")}
+    ordered_team_ids = sort_group_rows(table_by_team, group_matches, score_rows, rankings)
+    return pd.DataFrame([table_by_team[team_id] for team_id in ordered_team_ids])
+
+
+def sort_group_rows(
+    table_by_team: dict[str, dict[str, Any]],
+    group_matches: pd.DataFrame,
+    score_rows: dict[str, dict[str, Any]],
+    rankings: dict[str, int],
+) -> list[str]:
     ordered_by_points = sorted(table_by_team, key=lambda team_id: -to_int(table_by_team[team_id]["points"]))
 
     ordered_team_ids: list[str] = []
@@ -1788,7 +1819,7 @@ def sort_group_table(
 
         ordered_team_ids.extend(resolve_group_points_tie(tied, group_matches, score_rows, table_by_team, rankings))
 
-    return pd.DataFrame([table_by_team[team_id] for team_id in ordered_team_ids])
+    return ordered_team_ids
 
 
 def calculate_single_group_standing(
@@ -1807,11 +1838,28 @@ def calculate_group_standings(
     matches: pd.DataFrame,
     score_df: pd.DataFrame,
     use_cards: bool,
+    score_rows: dict[str, dict[str, Any]] | None = None,
+    rankings: dict[str, int] | None = None,
+    teams_by_group: dict[str, list[str]] | None = None,
+    matches_by_group: dict[str, pd.DataFrame] | None = None,
 ) -> dict[str, pd.DataFrame]:
     standings: dict[str, pd.DataFrame] = {}
+    score_rows = score_rows if score_rows is not None else score_lookup(score_df)
+    rankings = rankings if rankings is not None else team_rankings_lookup(teams)
+    teams_by_group = teams_by_group if teams_by_group is not None else team_ids_by_group(teams)
+    matches_by_group = matches_by_group if matches_by_group is not None else group_match_rows_by_group(matches, teams)
 
     for group in GROUPS:
-        standings[group] = calculate_single_group_standing(group, teams, matches, score_df, use_cards)
+        standings[group] = group_standing_from_score_rows(
+            group,
+            teams,
+            matches,
+            score_rows,
+            use_cards,
+            rankings=rankings,
+            group_teams=teams_by_group.get(group, []),
+            group_matches=matches_by_group.get(group, matches.iloc[0:0]),
+        )
 
     return standings
 
@@ -1902,15 +1950,33 @@ def confirmed_group_position_slots(
     matches: pd.DataFrame,
     score_df: pd.DataFrame,
     teams: pd.DataFrame,
+    score_rows: dict[str, dict[str, Any]] | None = None,
+    matches_by_group: dict[str, pd.DataFrame] | None = None,
+    completed_groups: set[str] | None = None,
 ) -> set[str]:
     confirmed_slots: set[str] = set()
+    score_rows = score_rows if score_rows is not None else score_lookup(score_df)
+    matches_by_group = matches_by_group if matches_by_group is not None else group_match_rows_by_group(matches, teams)
+    completed_groups = (
+        completed_groups
+        if completed_groups is not None
+        else completed_groups_from_rows(score_rows, matches_by_group)
+    )
 
     for group, table in group_standings.items():
-        if group_is_complete(group, matches, score_df, teams):
+        if group in completed_groups:
             confirmed_slots.update(f"{position + 1}{group}" for position in range(min(3, len(table))))
             continue
 
-        context = group_lock_context(group, table, matches, score_df, teams)
+        context = group_lock_context(
+            group,
+            table,
+            matches,
+            score_df,
+            teams,
+            score_rows=score_rows,
+            group_matches=matches_by_group.get(group, matches.iloc[0:0]),
+        )
         ordered_team_ids = [str(team_id) for team_id in table["team_id"]]
         for position, team_id in enumerate(ordered_team_ids[:3]):
             teams_above = ordered_team_ids[:position]
@@ -1945,18 +2011,39 @@ def derive_tournament_state(
     require_confirmed_placements: bool = False,
     cache_schema_version: str = CACHE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
-    group_standings = calculate_group_standings(teams, matches, score_df, use_cards)
+    score_rows = score_lookup(score_df)
+    rankings = team_rankings_lookup(teams)
+    teams_by_group = team_ids_by_group(teams)
+    matches_by_group = group_match_rows_by_group(matches, teams)
+    completed_groups = completed_groups_from_rows(score_rows, matches_by_group)
+    group_standings = calculate_group_standings(
+        teams,
+        matches,
+        score_df,
+        use_cards,
+        score_rows=score_rows,
+        rankings=rankings,
+        teams_by_group=teams_by_group,
+        matches_by_group=matches_by_group,
+    )
     third_place = calculate_third_place_standings(group_standings, teams)
     confirmed_position_slots = None
     third_place_for_combination = third_place
     if require_confirmed_placements:
-        confirmed_position_slots = confirmed_group_position_slots(group_standings, matches, score_df, teams)
-        if all(group_is_complete(group, matches, score_df, teams) for group in GROUPS):
+        confirmed_position_slots = confirmed_group_position_slots(
+            group_standings,
+            matches,
+            score_df,
+            teams,
+            score_rows=score_rows,
+            matches_by_group=matches_by_group,
+            completed_groups=completed_groups,
+        )
+        if all(group in completed_groups for group in GROUPS):
             third_place_for_combination = third_place
         else:
             third_place_for_combination = third_place.iloc[0:0].copy()
     combination_row = find_third_place_combination(third_place_for_combination, third_place_combinations)
-    score_rows = score_lookup(score_df)
     matchup_rows = {row["match_id"]: row.to_dict() for _, row in knockout_matchups.iterrows()}
 
     winners: dict[str, str] = {}
@@ -2036,13 +2123,23 @@ def derive_tournament_state(
 
 
 def stage_entrants(resolved_matches: pd.DataFrame, stage: str) -> set[str]:
-    rows = resolved_matches[resolved_matches["stage"] == stage]
-    entrants: set[str] = set()
-    for _, row in rows.iterrows():
-        if row["home_team"]:
-            entrants.add(row["home_team"])
-        if row["away_team"]:
-            entrants.add(row["away_team"])
+    return stage_entrants_by_stage(resolved_matches).get(stage, set())
+
+
+def stage_entrants_by_stage(resolved_matches: pd.DataFrame) -> dict[str, set[str]]:
+    entrants = {stage: set() for stage in STAGES}
+    if resolved_matches.empty or "stage" not in resolved_matches.columns:
+        return entrants
+    for row in resolved_matches.to_dict("records"):
+        stage = str(row.get("stage", ""))
+        if stage not in entrants:
+            entrants[stage] = set()
+        home_team = str(row.get("home_team", "")).strip()
+        away_team = str(row.get("away_team", "")).strip()
+        if home_team:
+            entrants[stage].add(home_team)
+        if away_team:
+            entrants[stage].add(away_team)
     return entrants
 
 
@@ -2091,6 +2188,26 @@ def team_groups_lookup(teams: pd.DataFrame) -> dict[str, str]:
     return dict(zip(teams["team_id"].astype(str), teams["group"].astype(str)))
 
 
+def team_rankings_lookup(teams: pd.DataFrame) -> dict[str, int]:
+    if teams.empty or "team_id" not in teams.columns or "world_cup_ranking" not in teams.columns:
+        return {}
+    return {
+        str(team_id): to_int(ranking, 9999)
+        for team_id, ranking in zip(teams["team_id"], teams["world_cup_ranking"])
+    }
+
+
+def team_ids_by_group(teams: pd.DataFrame) -> dict[str, list[str]]:
+    grouped = {group: [] for group in GROUPS}
+    if teams.empty or "team_id" not in teams.columns or "group" not in teams.columns:
+        return grouped
+    for team_id, group in zip(teams["team_id"], teams["group"]):
+        group_text = str(group)
+        if group_text in grouped:
+            grouped[group_text].append(str(team_id))
+    return grouped
+
+
 def match_group(match: pd.Series, teams: pd.DataFrame) -> str:
     if str(match.get("stage", "")) != GROUP_STAGE:
         return ""
@@ -2134,25 +2251,52 @@ def results_for_stage(results: pd.DataFrame, matches: pd.DataFrame, stage: str) 
 
 
 def group_is_complete(group: str, matches: pd.DataFrame, results: pd.DataFrame, teams: pd.DataFrame) -> bool:
-    team_groups = dict(zip(teams["team_id"], teams["group"]))
-    group_matches = matches[
-        (matches["stage"] == GROUP_STAGE)
-        & (matches["home_team"].map(team_groups) == group)
-        & (matches["away_team"].map(team_groups) == group)
-    ]
+    group_matches = group_match_rows(group, matches, teams)
     result_rows = score_lookup(results)
     return not group_matches.empty and all(
-        completed_score(result_rows.get(match_id)) is not None for match_id in group_matches["match_id"]
+        completed_score(result_rows.get(str(match_id))) is not None for match_id in group_matches["match_id"]
     )
 
 
+def completed_groups_lookup(results: pd.DataFrame, matches: pd.DataFrame, teams: pd.DataFrame) -> set[str]:
+    result_rows = score_lookup(results)
+    matches_by_group = group_match_rows_by_group(matches, teams)
+    return completed_groups_from_rows(result_rows, matches_by_group)
+
+
+def completed_groups_from_rows(
+    result_rows: dict[str, dict[str, Any]],
+    matches_by_group: dict[str, pd.DataFrame],
+) -> set[str]:
+    completed_groups: set[str] = set()
+    for group, group_matches in matches_by_group.items():
+        if group_matches.empty:
+            continue
+        if all(completed_score(result_rows.get(str(match_id))) is not None for match_id in group_matches["match_id"]):
+            completed_groups.add(group)
+    return completed_groups
+
+
 def group_match_rows(group: str, matches: pd.DataFrame, teams: pd.DataFrame) -> pd.DataFrame:
-    team_groups = dict(zip(teams["team_id"], teams["group"]))
-    return matches[
-        (matches["stage"] == GROUP_STAGE)
-        & (matches["home_team"].map(team_groups) == group)
-        & (matches["away_team"].map(team_groups) == group)
-    ]
+    return group_match_rows_by_group(matches, teams).get(group, matches.iloc[0:0])
+
+
+def group_match_rows_by_group(matches: pd.DataFrame, teams: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    empty = matches.iloc[0:0]
+    grouped = {group: empty for group in GROUPS}
+    if matches.empty or teams.empty:
+        return grouped
+    required_columns = {"stage", "home_team", "away_team"}
+    if not required_columns.issubset(matches.columns):
+        return grouped
+
+    team_groups = team_groups_lookup(teams)
+    group_matches = matches[matches["stage"].eq(GROUP_STAGE)]
+    home_groups = group_matches["home_team"].astype(str).map(team_groups)
+    away_groups = group_matches["away_team"].astype(str).map(team_groups)
+    for group in GROUPS:
+        grouped[group] = group_matches[home_groups.eq(group) & away_groups.eq(group)]
+    return grouped
 
 
 def remaining_group_matches(group: str, matches: pd.DataFrame, results: pd.DataFrame, teams: pd.DataFrame) -> pd.DataFrame:
@@ -2169,8 +2313,22 @@ def group_standing_from_score_rows(
     matches: pd.DataFrame,
     score_rows: dict[str, dict[str, Any]],
     use_cards: bool,
+    rankings: dict[str, int] | None = None,
+    group_teams: list[str] | None = None,
+    group_matches: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    ordered_team_ids, rows = ordered_group_rows_from_score_rows(group, teams, matches, score_rows, use_cards)
+    ordered_team_ids, rows = ordered_group_rows_from_score_rows(
+        group,
+        teams,
+        matches,
+        score_rows,
+        use_cards,
+        rankings=rankings,
+        group_teams=group_teams,
+        group_matches=group_matches,
+    )
+    if not ordered_team_ids:
+        return pd.DataFrame(columns=STANDING_COLUMNS)
     return pd.DataFrame([rows[team_id] for team_id in ordered_team_ids])[STANDING_COLUMNS].reset_index(drop=True)
 
 
@@ -2180,9 +2338,12 @@ def ordered_group_rows_from_score_rows(
     matches: pd.DataFrame,
     score_rows: dict[str, dict[str, Any]],
     use_cards: bool,
+    rankings: dict[str, int] | None = None,
+    group_teams: list[str] | None = None,
+    group_matches: pd.DataFrame | None = None,
 ) -> tuple[list[str], dict[str, dict[str, Any]]]:
-    rankings = {row["team_id"]: to_int(row["world_cup_ranking"], 9999) for _, row in teams.iterrows()}
-    group_teams = teams[teams["group"] == group]["team_id"].tolist()
+    rankings = rankings if rankings is not None else team_rankings_lookup(teams)
+    group_teams = group_teams if group_teams is not None else team_ids_by_group(teams).get(group, [])
     rows = {
         team_id: {
             "team_id": team_id,
@@ -2198,9 +2359,9 @@ def ordered_group_rows_from_score_rows(
         }
         for team_id in group_teams
     }
-    group_matches = group_match_rows(group, matches, teams)
+    group_matches = group_matches if group_matches is not None else group_match_rows(group, matches, teams)
 
-    for _, match in group_matches.iterrows():
+    for match in group_matches.to_dict("records"):
         match_id = str(match["match_id"])
         score = completed_score(score_rows.get(match_id))
         if score is None:
@@ -2236,13 +2397,10 @@ def ordered_group_rows_from_score_rows(
             rows[home_id]["fair_play_score"] += fair_play_delta(card_row, "home")
             rows[away_id]["fair_play_score"] += fair_play_delta(card_row, "away")
 
-    table = pd.DataFrame(rows.values())
-    table["goal_difference"] = table["goals_for"] - table["goals_against"]
-    sorted_table = sort_group_table(table, group_matches, score_rows, rankings)
-    return [str(team_id) for team_id in sorted_table["team_id"]], {
-        str(row["team_id"]): row.to_dict()
-        for _, row in sorted_table.iterrows()
-    }
+    for row in rows.values():
+        row["goal_difference"] = row["goals_for"] - row["goals_against"]
+    ordered_team_ids = sort_group_rows(rows, group_matches, score_rows, rankings)
+    return ordered_team_ids, {team_id: rows[team_id] for team_id in ordered_team_ids}
 
 
 def head_to_head_points_between(
@@ -2251,7 +2409,7 @@ def head_to_head_points_between(
     group_matches: pd.DataFrame,
     score_rows: dict[str, dict[str, Any]],
 ) -> tuple[int, int] | None:
-    for _, match in group_matches.iterrows():
+    for match in group_matches.to_dict("records"):
         home_id = str(match["home_team"])
         away_id = str(match["away_team"])
         if {home_id, away_id} != {team_id, other_id}:
@@ -2275,13 +2433,15 @@ def group_lock_context(
     matches: pd.DataFrame,
     results: pd.DataFrame,
     teams: pd.DataFrame,
+    score_rows: dict[str, dict[str, Any]] | None = None,
+    group_matches: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
-    score_rows = score_lookup(results)
-    group_matches = group_match_rows(group, matches, teams)
+    score_rows = score_rows if score_rows is not None else score_lookup(results)
+    group_matches = group_matches if group_matches is not None else group_match_rows(group, matches, teams)
     team_ids = [str(team_id) for team_id in table["team_id"]]
-    points = {str(row["team_id"]): to_int(row["points"]) for _, row in table.iterrows()}
+    points = {str(row["team_id"]): to_int(row["points"]) for row in table.to_dict("records")}
     remaining_by_team = {team_id: 0 for team_id in team_ids}
-    for _, match in group_matches.iterrows():
+    for match in group_matches.to_dict("records"):
         if completed_score(score_rows.get(str(match["match_id"]))) is not None:
             continue
         remaining_by_team[str(match["home_team"])] += 1
@@ -2411,6 +2571,12 @@ def calculate_user_score_breakdown_from_states(
     teams: pd.DataFrame,
     matches: pd.DataFrame,
     awarded_group_standings: set[str] | None = None,
+    completed_groups: set[str] | None = None,
+    prediction_stage_entrants: dict[str, set[str]] | None = None,
+    actual_stage_entrants: dict[str, set[str]] | None = None,
+    predicted_scores: dict[str, dict[str, Any]] | None = None,
+    actual_scores: dict[str, dict[str, Any]] | None = None,
+    match_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, int]:
     match_score_points = 0
     group_standings_points = 0
@@ -2419,16 +2585,25 @@ def calculate_user_score_breakdown_from_states(
     exact_home_goals = 0
     exact_away_goals = 0
     exact_scores = 0
-    predicted_scores = score_lookup(user_predictions)
-    actual_scores = score_lookup(actual_results)
+    predicted_scores = predicted_scores if predicted_scores is not None else score_lookup(user_predictions)
+    actual_scores = actual_scores if actual_scores is not None else score_lookup(actual_results)
+    match_records = match_records if match_records is not None else matches.to_dict("records")
     predicted_resolved = prediction_state["resolved_matches"]
     actual_resolved = actual_state["resolved_matches"]
-    predicted_resolved_rows = score_lookup(predicted_resolved)
-    actual_resolved_rows = score_lookup(actual_resolved)
+    prediction_stage_entrants = (
+        prediction_stage_entrants
+        if prediction_stage_entrants is not None
+        else stage_entrants_by_stage(predicted_resolved)
+    )
+    actual_stage_entrants = (
+        actual_stage_entrants
+        if actual_stage_entrants is not None
+        else stage_entrants_by_stage(actual_resolved)
+    )
 
-    for _, match in matches.iterrows():
+    for match in match_records:
         scored = match_score_points_for_match(
-            match, predicted_scores, actual_scores, predicted_resolved_rows, actual_resolved_rows
+            match, predicted_scores, actual_scores, {}, {}
         )
         match_score_points += scored["total_points"]
         correct_winners += scored["correct_winner"]
@@ -2437,7 +2612,12 @@ def calculate_user_score_breakdown_from_states(
         exact_scores += scored["exact_score"]
 
     for group in GROUPS:
-        if not group_is_complete(group, matches, actual_results, teams):
+        group_complete = (
+            group in completed_groups
+            if completed_groups is not None
+            else group_is_complete(group, matches, actual_results, teams)
+        )
+        if not group_complete:
             continue
         if awarded_group_standings is not None and group not in awarded_group_standings:
             continue
@@ -2448,11 +2628,10 @@ def calculate_user_score_breakdown_from_states(
                 group_standings_points += GROUP_STANDING_POSITION_POINTS
 
     for stage, stage_points in KNOCKOUT_STAGE_POINTS.items():
-        actual_entrants = stage_entrants(actual_resolved, stage)
+        actual_entrants = actual_stage_entrants.get(stage, set())
         if actual_entrants:
-            knockout_progression_points += (
-                len(stage_entrants(predicted_resolved, stage) & actual_entrants) * stage_points
-            )
+            predicted_entrants = prediction_stage_entrants.get(stage, set())
+            knockout_progression_points += len(predicted_entrants & actual_entrants) * stage_points
 
     predicted_third_place = prediction_state["winners"].get(THIRD_PLACE_MATCH_ID)
     actual_third_place = actual_state["winners"].get(THIRD_PLACE_MATCH_ID)
@@ -2487,20 +2666,20 @@ def update_leaderboard_file() -> pd.DataFrame:
     knockout_matchups = read_csv(KNOCKOUT_MATCHUPS_FILE)
     third_place_combinations = read_csv(THIRD_PLACE_COMBINATIONS_FILE)
 
-    rows = []
-    for _, user in users.iterrows():
-        predictions = load_user_predictions(user["user_id"])
-        points = calculate_user_points(
-            predictions, results, teams, matches, knockout_matchups, third_place_combinations
-        )
-        rows.append({"user_id": user["user_id"], "user_name": user["user_name"], "total_points": points})
-
-    leaderboard = pd.DataFrame(rows, columns=["user_id", "user_name", "total_points"])
-    if not leaderboard.empty:
-        leaderboard = leaderboard.sort_values(
-            by=["total_points", "user_name"], ascending=[False, True]
-        ).reset_index(drop=True)
-        leaderboard.insert(0, "rank", range(1, len(leaderboard) + 1))
+    participants = leaderboard_participants(users, include_ai=False)
+    snapshot = leaderboard_snapshot(
+        participants,
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+    )
+    leaderboard = (
+        snapshot[["rank", "user_id", "user_name", "total_points"]].copy()
+        if not snapshot.empty
+        else pd.DataFrame(columns=["rank", "user_id", "user_name", "total_points"])
+    )
 
     if google_sheets_enabled():
         write_sheet("leaderboard", leaderboard, ["rank", "user_id", "user_name", "total_points"])
@@ -2534,6 +2713,7 @@ def validate_sources(
     results: pd.DataFrame,
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
+    validate_predictions: bool = False,
 ) -> list[str]:
     errors: list[str] = []
 
@@ -2626,8 +2806,9 @@ def validate_sources(
     result_errors = validate_results_file(results, valid_match_ids)
     errors.extend(result_errors)
 
-    prediction_errors = validate_prediction_files(valid_user_ids, valid_match_ids)
-    errors.extend(prediction_errors)
+    if validate_predictions:
+        prediction_errors = validate_prediction_files(valid_user_ids, valid_match_ids)
+        errors.extend(prediction_errors)
 
     return errors
 
@@ -3574,15 +3755,12 @@ def render_rules() -> None:
     )
 
 
-def load_ai_predictions() -> list[dict[str, Any]]:
+@st.cache_data
+def load_ai_predictions_from_files(file_signatures: tuple[tuple[str, float], ...]) -> list[dict[str, Any]]:
     participants = []
-    if not AI_PREDICTIONS_DIR.exists():
-        return participants
-    for path in sorted(AI_PREDICTIONS_DIR.glob("predictions_*.csv")):
-        predictions = pd.read_csv(path, dtype=str).fillna("")
-        for column in PREDICTION_COLUMNS:
-            if column not in predictions.columns:
-                predictions[column] = ""
+    for path_text, modified_time in file_signatures:
+        path = Path(path_text)
+        predictions = load_prediction_csv(path, modified_time)
         user_id = str(predictions["user_id"].iloc[0]).strip() if not predictions.empty else path.stem
         name = path.stem.replace("predictions_", "")
         participants.append(
@@ -3594,6 +3772,16 @@ def load_ai_predictions() -> list[dict[str, Any]]:
             }
         )
     return participants
+
+
+def load_ai_predictions() -> list[dict[str, Any]]:
+    if not AI_PREDICTIONS_DIR.exists():
+        return []
+    file_signatures = tuple(
+        (str(path), path.stat().st_mtime)
+        for path in sorted(AI_PREDICTIONS_DIR.glob("predictions_*.csv"))
+    )
+    return load_ai_predictions_from_files(file_signatures)
 
 
 def load_human_predictions(users: pd.DataFrame) -> list[dict[str, Any]]:
@@ -3627,6 +3815,45 @@ def leaderboard_participants(users: pd.DataFrame, include_ai: bool) -> list[dict
     return participants
 
 
+def prediction_states_for_participants(
+    participants: list[dict[str, Any]],
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(participant["user_id"]): derive_tournament_state(
+            teams,
+            matches,
+            participant["predictions"],
+            knockout_matchups,
+            third_place_combinations,
+            use_cards=False,
+        )
+        for participant in participants
+    }
+
+
+LEADERBOARD_SNAPSHOT_COLUMNS = [
+    "rank",
+    "user_id",
+    "user_name",
+    "is_ai",
+    "total_points",
+    "match_score_points",
+    "group_standings_points",
+    "knockout_progression_points",
+    "correct_winners",
+    "exact_home_goals",
+    "exact_away_goals",
+    "exact_goal_components",
+    "exact_scores",
+]
+
+LEADERBOARD_CACHE_COLUMNS = ["cache_key", "checkpoint_id", "rank_change", *LEADERBOARD_SNAPSHOT_COLUMNS]
+
+
 def add_rank(table: pd.DataFrame, points_column: str = "total_points") -> pd.DataFrame:
     if table.empty:
         return table
@@ -3652,22 +3879,11 @@ def leaderboard_snapshot(
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
     awarded_group_standings: set[str] | None = None,
+    precomputed_prediction_states: dict[str, dict[str, Any]] | None = None,
+    precomputed_prediction_scores: dict[str, dict[str, dict[str, Any]]] | None = None,
+    precomputed_prediction_stage_entrants: dict[str, dict[str, set[str]]] | None = None,
+    precomputed_match_records: list[dict[str, Any]] | None = None,
 ) -> pd.DataFrame:
-    columns = [
-        "rank",
-        "user_id",
-        "user_name",
-        "is_ai",
-        "total_points",
-        "match_score_points",
-        "group_standings_points",
-        "knockout_progression_points",
-        "correct_winners",
-        "exact_home_goals",
-        "exact_away_goals",
-        "exact_goal_components",
-        "exact_scores",
-    ]
     rows = []
     actual_state = derive_tournament_state(
         teams,
@@ -3678,10 +3894,37 @@ def leaderboard_snapshot(
         use_cards=True,
         require_confirmed_placements=True,
     )
+    completed_groups = completed_groups_lookup(results, matches, teams)
+    actual_scores = score_lookup(results)
+    match_records = precomputed_match_records if precomputed_match_records is not None else matches.to_dict("records")
+    actual_stage_entrants = stage_entrants_by_stage(actual_state["resolved_matches"])
+    prediction_stage_entrants_by_user = dict(precomputed_prediction_stage_entrants or {})
+    if precomputed_prediction_stage_entrants is None:
+        prediction_stage_entrants_by_user = {
+            str(user_id): stage_entrants_by_stage(state["resolved_matches"])
+            for user_id, state in (precomputed_prediction_states or {}).items()
+        }
+    prediction_scores_by_user = dict(precomputed_prediction_scores or {})
+    if precomputed_prediction_scores is None:
+        prediction_scores_by_user = {
+            str(participant["user_id"]): score_lookup(participant["predictions"])
+            for participant in participants
+        }
     for participant in participants:
-        prediction_state = derive_tournament_state(
-            teams, matches, participant["predictions"], knockout_matchups, third_place_combinations, use_cards=False
-        )
+        user_id = str(participant["user_id"])
+        prediction_state = (precomputed_prediction_states or {}).get(user_id)
+        if prediction_state is None:
+            prediction_state = derive_tournament_state(
+                teams,
+                matches,
+                participant["predictions"],
+                knockout_matchups,
+                third_place_combinations,
+                use_cards=False,
+            )
+            prediction_stage_entrants_by_user[user_id] = stage_entrants_by_stage(
+                prediction_state["resolved_matches"]
+            )
         breakdown = calculate_user_score_breakdown_from_states(
             participant["predictions"],
             prediction_state,
@@ -3690,6 +3933,12 @@ def leaderboard_snapshot(
             teams,
             matches,
             awarded_group_standings=awarded_group_standings,
+            completed_groups=completed_groups,
+            prediction_stage_entrants=prediction_stage_entrants_by_user.get(user_id),
+            actual_stage_entrants=actual_stage_entrants,
+            predicted_scores=prediction_scores_by_user.get(user_id),
+            actual_scores=actual_scores,
+            match_records=match_records,
         )
         rows.append(
             {
@@ -3700,8 +3949,173 @@ def leaderboard_snapshot(
             }
         )
     if not rows:
-        return pd.DataFrame(columns=columns)
+        return pd.DataFrame(columns=LEADERBOARD_SNAPSHOT_COLUMNS)
     return add_rank(pd.DataFrame(rows), "total_points")
+
+
+def leaderboard_cache_version() -> str:
+    return str(load_config().get("leaderboard_cache_version", "1")).strip() or "1"
+
+
+def leaderboard_cache_key(
+    users: pd.DataFrame,
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+    checkpoint: dict[str, Any],
+) -> str:
+    user_signature = tuple(
+        (str(row["user_id"]), str(row["user_name"]))
+        for _, row in users[["user_id", "user_name"]].iterrows()
+    )
+    key_parts = {
+        "schema": "leaderboard-checkpoint-v1",
+        "version": leaderboard_cache_version(),
+        "checkpoint_id": str(checkpoint["checkpoint_id"]),
+        "through_match_id": str(checkpoint["through_match_id"]),
+        "awarded_group_standings": tuple(sorted(checkpoint["awarded_group_standings"])),
+        "users": user_signature,
+        "results": dataframe_cache_key(results),
+        "teams": dataframe_cache_key(teams),
+        "matches": dataframe_cache_key(matches),
+        "knockout_matchups": dataframe_cache_key(knockout_matchups),
+        "third_place_combinations": dataframe_cache_key(third_place_combinations),
+    }
+    encoded = json.dumps(key_parts, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_leaderboard_cache_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    for column in LEADERBOARD_CACHE_COLUMNS:
+        if column not in rows.columns:
+            rows[column] = ""
+    rows = rows[LEADERBOARD_CACHE_COLUMNS].copy()
+    numeric_columns = [
+        "rank",
+        "total_points",
+        "match_score_points",
+        "group_standings_points",
+        "knockout_progression_points",
+        "correct_winners",
+        "exact_home_goals",
+        "exact_away_goals",
+        "exact_goal_components",
+        "exact_scores",
+    ]
+    for column in numeric_columns:
+        rows[column] = pd.to_numeric(rows[column], errors="coerce").fillna(0).astype(int)
+    rows["is_ai"] = rows["is_ai"].map(
+        lambda value: str(value).strip().lower() in {"1", "true", "yes"}
+    )
+    rows["rank_change"] = rows["rank_change"].replace("", "-")
+    return rows
+
+
+def read_leaderboard_cache(cache_key: str) -> pd.DataFrame | None:
+    if not google_sheets_enabled():
+        return None
+    cache = read_sheet_fresh(LEADERBOARD_CACHE_SHEET, tuple(LEADERBOARD_CACHE_COLUMNS))
+    if cache.empty or "cache_key" not in cache.columns:
+        return None
+    matching = cache[cache["cache_key"].astype(str).eq(str(cache_key))].copy()
+    if matching.empty:
+        return None
+    rows = normalize_leaderboard_cache_rows(matching)
+    return rows[["rank_change", *LEADERBOARD_SNAPSHOT_COLUMNS]].reset_index(drop=True)
+
+
+def write_leaderboard_cache(cache_key: str, checkpoint_id: str, snapshot: pd.DataFrame) -> str:
+    if not google_sheets_enabled():
+        return "disabled"
+    if snapshot.empty:
+        return "empty"
+    try:
+        existing = read_sheet_fresh(LEADERBOARD_CACHE_SHEET, tuple(LEADERBOARD_CACHE_COLUMNS))
+        if not existing.empty and "cache_key" in existing.columns:
+            existing = existing[~existing["cache_key"].astype(str).eq(str(cache_key))]
+        cache_rows = snapshot.copy().fillna("")
+        for column in ["rank_change", *LEADERBOARD_SNAPSHOT_COLUMNS]:
+            if column not in cache_rows.columns:
+                cache_rows[column] = "-" if column == "rank_change" else ""
+        cache_rows = cache_rows[["rank_change", *LEADERBOARD_SNAPSHOT_COLUMNS]]
+        cache_rows.insert(0, "checkpoint_id", checkpoint_id)
+        cache_rows.insert(0, "cache_key", cache_key)
+        updated = pd.concat([existing, cache_rows], ignore_index=True)
+        write_sheet(LEADERBOARD_CACHE_SHEET, updated, LEADERBOARD_CACHE_COLUMNS)
+        confirmed = read_sheet_fresh(LEADERBOARD_CACHE_SHEET, tuple(LEADERBOARD_CACHE_COLUMNS))
+    except GoogleSheetsRateLimitError:
+        raise
+    except Exception as error:
+        return f"error:{type(error).__name__}: {error}"
+    if (
+        not confirmed.empty
+        and "cache_key" in confirmed.columns
+        and confirmed["cache_key"].astype(str).eq(str(cache_key)).any()
+    ):
+        return f"verified:{len(cache_rows)}"
+    return "not_visible"
+
+
+def compute_checkpoint_snapshot(
+    participants: list[dict[str, Any]],
+    results: pd.DataFrame,
+    matches: pd.DataFrame,
+    checkpoint: dict[str, Any],
+    previous_checkpoint: dict[str, Any] | None,
+    teams: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+) -> pd.DataFrame:
+    prediction_states = prediction_states_for_participants(
+        participants, teams, matches, knockout_matchups, third_place_combinations
+    )
+    prediction_scores = {
+        str(participant["user_id"]): score_lookup(participant["predictions"])
+        for participant in participants
+    }
+    prediction_stage_entrants = {
+        user_id: stage_entrants_by_stage(state["resolved_matches"])
+        for user_id, state in prediction_states.items()
+    }
+    match_records = matches.to_dict("records")
+    current_results = results_through_match(results, matches, str(checkpoint["through_match_id"]))
+    current = leaderboard_snapshot(
+        participants,
+        current_results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+        awarded_group_standings=set(checkpoint["awarded_group_standings"]),
+        precomputed_prediction_states=prediction_states,
+        precomputed_prediction_scores=prediction_scores,
+        precomputed_prediction_stage_entrants=prediction_stage_entrants,
+        precomputed_match_records=match_records,
+    )
+    previous_ranks = {}
+    if previous_checkpoint is not None:
+        previous_results = results_through_match(results, matches, str(previous_checkpoint["through_match_id"]))
+        previous = leaderboard_snapshot(
+            participants,
+            previous_results,
+            teams,
+            matches,
+            knockout_matchups,
+            third_place_combinations,
+            awarded_group_standings=set(previous_checkpoint["awarded_group_standings"]),
+            precomputed_prediction_states=prediction_states,
+            precomputed_prediction_scores=prediction_scores,
+            precomputed_prediction_stage_entrants=prediction_stage_entrants,
+            precomputed_match_records=match_records,
+        )
+        previous_ranks = dict(zip(previous["user_id"], previous["rank"]))
+    current["rank_change"] = current.apply(
+        lambda row: format_change(to_int(row["rank"]), previous_ranks.get(row["user_id"])),
+        axis=1,
+    )
+    return current
 
 
 def completed_match_options(results: pd.DataFrame, matches: pd.DataFrame, teams: pd.DataFrame) -> list[tuple[str, str]]:
@@ -3820,9 +4234,30 @@ def snapshot_with_rank_change(
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
 ) -> pd.DataFrame:
+    prediction_states = prediction_states_for_participants(
+        participants, teams, matches, knockout_matchups, third_place_combinations
+    )
+    prediction_scores = {
+        str(participant["user_id"]): score_lookup(participant["predictions"])
+        for participant in participants
+    }
+    prediction_stage_entrants = {
+        user_id: stage_entrants_by_stage(state["resolved_matches"])
+        for user_id, state in prediction_states.items()
+    }
+    match_records = matches.to_dict("records")
     current_results = results_through_match(results, matches, selected_match_id)
     current = leaderboard_snapshot(
-        participants, current_results, teams, matches, knockout_matchups, third_place_combinations
+        participants,
+        current_results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+        precomputed_prediction_states=prediction_states,
+        precomputed_prediction_scores=prediction_scores,
+        precomputed_prediction_stage_entrants=prediction_stage_entrants,
+        precomputed_match_records=match_records,
     )
     match_ids = completed_match_ids(results, matches)
     selected_index = match_ids.index(selected_match_id) if selected_match_id in match_ids else -1
@@ -3830,7 +4265,16 @@ def snapshot_with_rank_change(
     if selected_index > 0:
         previous_results = results_through_match(results, matches, match_ids[selected_index - 1])
         previous = leaderboard_snapshot(
-            participants, previous_results, teams, matches, knockout_matchups, third_place_combinations
+            participants,
+            previous_results,
+            teams,
+            matches,
+            knockout_matchups,
+            third_place_combinations,
+            precomputed_prediction_states=prediction_states,
+            precomputed_prediction_scores=prediction_scores,
+            precomputed_prediction_stage_entrants=prediction_stage_entrants,
+            precomputed_match_records=match_records,
         )
         previous_ranks = dict(zip(previous["user_id"], previous["rank"]))
     current["rank_change"] = current.apply(
@@ -3849,6 +4293,18 @@ def snapshot_with_checkpoint_rank_change(
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
 ) -> pd.DataFrame:
+    prediction_states = prediction_states_for_participants(
+        participants, teams, matches, knockout_matchups, third_place_combinations
+    )
+    prediction_scores = {
+        str(participant["user_id"]): score_lookup(participant["predictions"])
+        for participant in participants
+    }
+    prediction_stage_entrants = {
+        user_id: stage_entrants_by_stage(state["resolved_matches"])
+        for user_id, state in prediction_states.items()
+    }
+    match_records = matches.to_dict("records")
     checkpoint_lookup = {checkpoint["checkpoint_id"]: checkpoint for checkpoint in checkpoints}
     current_checkpoint = checkpoint_lookup[selected_checkpoint_id]
     current_results = results_through_match(
@@ -3862,6 +4318,10 @@ def snapshot_with_checkpoint_rank_change(
         knockout_matchups,
         third_place_combinations,
         awarded_group_standings=set(current_checkpoint["awarded_group_standings"]),
+        precomputed_prediction_states=prediction_states,
+        precomputed_prediction_scores=prediction_scores,
+        precomputed_prediction_stage_entrants=prediction_stage_entrants,
+        precomputed_match_records=match_records,
     )
     selected_index = next(
         (
@@ -3885,6 +4345,10 @@ def snapshot_with_checkpoint_rank_change(
             knockout_matchups,
             third_place_combinations,
             awarded_group_standings=set(previous_checkpoint["awarded_group_standings"]),
+            precomputed_prediction_states=prediction_states,
+            precomputed_prediction_scores=prediction_scores,
+            precomputed_prediction_stage_entrants=prediction_stage_entrants,
+            precomputed_match_records=match_records,
         )
         previous_ranks = dict(zip(previous["user_id"], previous["rank"]))
     current["rank_change"] = current.apply(
@@ -4222,30 +4686,74 @@ def render_default_leaderboard(
     if not checkpoints:
         st.info("The leaderboard will appear once the first match has been played.")
         return
-    selected_checkpoint_id = checkpoints[-1]["checkpoint_id"]
     labels = [checkpoint["label"] for checkpoint in checkpoints]
-    selected_index = len(checkpoints) - 1
     selected_label = st.selectbox(
         "Show leaderboard after",
         labels,
-        index=selected_index,
+        index=len(checkpoints) - 1,
         key="leaderboard_after_match",
     )
     selected_checkpoint_id = {
         checkpoint["label"]: checkpoint["checkpoint_id"] for checkpoint in checkpoints
     }[selected_label]
-    participants = leaderboard_participants(users, include_ai=False)
-    snapshot = snapshot_with_checkpoint_rank_change(
-        participants,
+    selected_index = next(
+        index
+        for index, checkpoint in enumerate(checkpoints)
+        if checkpoint["checkpoint_id"] == selected_checkpoint_id
+    )
+    checkpoint = checkpoints[selected_index]
+    cache_key = leaderboard_cache_key(
+        users,
         results,
-        matches,
-        selected_checkpoint_id,
-        checkpoints,
         teams,
+        matches,
         knockout_matchups,
         third_place_combinations,
+        checkpoint,
     )
+    snapshot = read_leaderboard_cache(cache_key)
+    cache_status = "hit" if snapshot is not None else "miss"
+    if snapshot is None:
+        participants = leaderboard_participants(users, include_ai=False)
+        previous_checkpoint = checkpoints[selected_index - 1] if selected_index > 0 else None
+        with st.spinner("Calculating leaderboard..."):
+            snapshot = compute_checkpoint_snapshot(
+                participants,
+                results,
+                matches,
+                checkpoint,
+                previous_checkpoint,
+                teams,
+                knockout_matchups,
+                third_place_combinations,
+            )
+        cache_status = write_leaderboard_cache(cache_key, str(checkpoint["checkpoint_id"]), snapshot)
     display_leaderboard_table(snapshot, include_change=True)
+    cache_target = google_sheets_target_label()
+    if cache_status == "hit":
+        st.caption(
+            f"Loaded from Google Sheets cache sheet `{LEADERBOARD_CACHE_SHEET}` in {cache_target}."
+        )
+    elif cache_status.startswith("verified:"):
+        row_count = cache_status.split(":", 1)[1]
+        st.caption(
+            f"Saved and verified {row_count} rows in Google Sheets cache sheet "
+            f"`{LEADERBOARD_CACHE_SHEET}` in {cache_target}."
+        )
+    elif cache_status == "disabled":
+        st.warning(
+            "Leaderboard cache was not written because `GOOGLE_SHEETS_BACKEND` is not enabled "
+            "for this running app."
+        )
+    elif cache_status == "empty":
+        st.info("Leaderboard cache was not written because the computed snapshot was empty.")
+    elif cache_status == "not_visible":
+        st.error(
+            f"The cache write call completed, but `{LEADERBOARD_CACHE_SHEET}` in {cache_target} "
+            "did not contain the written cache key on immediate read-back."
+        )
+    elif cache_status.startswith("error:"):
+        st.error(f"Leaderboard cache write failed for {cache_target}: {cache_status.removeprefix('error:')}")
 
 
 def render_additional_rankings(
@@ -4258,7 +4766,14 @@ def render_additional_rankings(
 ) -> None:
     participants = leaderboard_participants(users, include_ai=False)
     scoped_results = results_for_stage(results, matches, GROUP_STAGE)
-    snapshot = leaderboard_snapshot(participants, scoped_results, teams, matches, knockout_matchups, third_place_combinations)
+    snapshot = leaderboard_snapshot(
+        participants,
+        scoped_results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+    )
     if snapshot.empty:
         st.info("Additional rankings will appear once participants have submitted predictions.")
         return
@@ -4328,6 +4843,10 @@ def group_match_predictability(
 ) -> pd.DataFrame:
     rows = []
     actual_rows = score_lookup(results)
+    participant_prediction_rows = {
+        participant["user_id"]: score_lookup(participant["predictions"])
+        for participant in participants
+    }
     for _, match in matches[matches["stage"] == GROUP_STAGE].iterrows():
         match_id = str(match["match_id"])
         actual = completed_score(actual_rows.get(match_id))
@@ -4337,7 +4856,7 @@ def group_match_predictability(
         total = 0
         correct = 0
         for participant in participants:
-            prediction = score_lookup(participant["predictions"]).get(match_id)
+            prediction = participant_prediction_rows[participant["user_id"]].get(match_id)
             predicted = completed_score(prediction)
             if predicted is None:
                 continue
@@ -4447,6 +4966,30 @@ def sync_default_per_match_phase(results: pd.DataFrame, matches: pd.DataFrame, p
     return default_index
 
 
+def sync_default_per_user_phase(results: pd.DataFrame, matches: pd.DataFrame, phase_options: list[str]) -> int:
+    default_index = default_per_match_phase_index(results, matches)
+    default_phase = phase_options[default_index]
+    default_state_key = "per_user_phase_default"
+    if st.session_state.get(default_state_key) != default_phase:
+        st.session_state["per_user_phase"] = default_phase
+        st.session_state[default_state_key] = default_phase
+    return default_index
+
+
+def sync_default_per_user_knockout_stage(
+    options: list[tuple[str, str]],
+    results: pd.DataFrame,
+    matches: pd.DataFrame,
+) -> int:
+    default_index = current_knockout_round_index(options, results, matches)
+    default_stage = options[default_index][1]
+    default_state_key = "per_user_knockout_stage_default"
+    if st.session_state.get(default_state_key) != default_stage:
+        st.session_state["per_user_knockout_stage"] = default_stage
+        st.session_state[default_state_key] = default_stage
+    return default_index
+
+
 def knockout_round_entrants_locked(stage: str, results: pd.DataFrame, matches: pd.DataFrame) -> bool:
     previous_stage = {
         "round_of_32": GROUP_STAGE,
@@ -4529,9 +5072,11 @@ def knockout_winner_first_result_text(row: dict[str, Any] | pd.Series | None, te
 def knockout_team_progress_status(
     team_id: str,
     actual_round_rows: pd.DataFrame,
+    actual_resolved_matches: pd.DataFrame,
     entrants_locked: bool,
     qualification_statuses: dict[str, str] | None = None,
 ) -> str:
+    team_id = str(team_id)
     for _, row in actual_round_rows.iterrows():
         home_id = str(row.get("home_team", "")).strip()
         away_id = str(row.get("away_team", "")).strip()
@@ -4542,6 +5087,10 @@ def knockout_team_progress_status(
             if not winner_id:
                 return "pending"
             return "advanced" if winner_id == team_id else "eliminated"
+    knockout_rows = actual_resolved_matches[actual_resolved_matches["stage"].isin(KNOCKOUT_STAGES)]
+    for _, row in knockout_rows.iterrows():
+        if str(row.get("loser", "")).strip() == team_id:
+            return "eliminated"
     group_status = (qualification_statuses or {}).get(str(team_id), "")
     if group_status == "eliminated":
         return "eliminated"
@@ -4552,6 +5101,7 @@ def predicted_team_progress_html(
     team_ids: list[str],
     teams: pd.DataFrame,
     actual_round_rows: pd.DataFrame,
+    actual_resolved_matches: pd.DataFrame,
     entrants_locked: bool,
     qualification_statuses: dict[str, str] | None = None,
 ) -> str:
@@ -4563,6 +5113,7 @@ def predicted_team_progress_html(
         status = knockout_team_progress_status(
             team_id,
             actual_round_rows,
+            actual_resolved_matches,
             entrants_locked,
             qualification_statuses,
         )
@@ -4707,6 +5258,7 @@ def render_knockout_progression_scores(
                     predicted_winners,
                     teams,
                     actual_round_rows,
+                    actual_state["resolved_matches"],
                     entrants_locked,
                     qualification_statuses,
                 ),
@@ -4901,13 +5453,31 @@ def render_per_user_scores(
         )
     with ai_col:
         selected_ais = st.multiselect("AI predictions", ai_names, key="per_user_ai")
-    phase = st.selectbox("Phase", ["Group stage", "Knockout phase"], key="per_user_phase")
+    phase_options = ["Group stage", "Knockout phase"]
+    phase = st.selectbox(
+        "Phase",
+        phase_options,
+        index=sync_default_per_user_phase(results, matches, phase_options),
+        key="per_user_phase",
+    )
     selected = sorted(
         [participant for participant in humans if participant["user_name"] in selected_humans]
         + [participant for participant in ais if participant["user_name"] in selected_ais],
         key=lambda participant: participant["user_name"].lower(),
     )
-    stage_filter = [GROUP_STAGE] if phase == "Group stage" else KNOCKOUT_STAGES
+    if phase == "Group stage":
+        stage_filter = [GROUP_STAGE]
+    else:
+        options = knockout_round_options()
+        labels = [label for _, label in options]
+        selected_label = st.selectbox(
+            "Stage",
+            labels,
+            index=sync_default_per_user_knockout_stage(options, results, matches),
+            key="per_user_knockout_stage",
+        )
+        selected_stage = dict((label, stage) for stage, label in options)[selected_label]
+        stage_filter = [selected_stage]
     rows = []
     actual_rows = score_lookup(results)
     prediction_rows = {
@@ -4987,7 +5557,6 @@ def render_per_user_scores(
     )
 
 
-@st.cache_data(show_spinner=False, hash_funcs={pd.DataFrame: dataframe_cache_key})
 def timeline_table(
     participants: list[dict[str, Any]],
     results: pd.DataFrame,
@@ -4997,7 +5566,21 @@ def timeline_table(
     third_place_combinations: pd.DataFrame,
 ) -> pd.DataFrame:
     rows = []
-    for match_id in completed_match_ids(results, matches):
+    completed_ids = completed_match_ids(results, matches)
+    columns = ["Match", "User name", "Participant type", "Points", "Rank"]
+    prediction_states = prediction_states_for_participants(
+        participants, teams, matches, knockout_matchups, third_place_combinations
+    )
+    prediction_scores = {
+        str(participant["user_id"]): score_lookup(participant["predictions"])
+        for participant in participants
+    }
+    prediction_stage_entrants = {
+        user_id: stage_entrants_by_stage(state["resolved_matches"])
+        for user_id, state in prediction_states.items()
+    }
+    match_records = matches.to_dict("records")
+    for match_id in completed_ids:
         scoped_results = results_through_match(results, matches, match_id)
         snapshot = leaderboard_snapshot(
             participants,
@@ -5006,8 +5589,12 @@ def timeline_table(
             matches,
             knockout_matchups,
             third_place_combinations,
+            precomputed_prediction_states=prediction_states,
+            precomputed_prediction_scores=prediction_scores,
+            precomputed_prediction_stage_entrants=prediction_stage_entrants,
+            precomputed_match_records=match_records,
         )
-        for _, row in snapshot.iterrows():
+        for row in snapshot.to_dict("records"):
             rows.append(
                 {
                     "Match": match_id,
@@ -5017,7 +5604,7 @@ def timeline_table(
                     "Rank": row["rank"],
                 }
             )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=columns)
 
 
 def leaderboard_default_human_names(
@@ -5092,14 +5679,15 @@ def render_timelines(
         if not full_rank_timeline.empty
         else full_rank_timeline
     )
-    selected_ai_participants = [p for p in ais if p["user_name"] in selected_ais]
-    ai_score_timeline = timeline_table(
-        selected_ai_participants,
-        results,
-        teams,
-        matches,
-        knockout_matchups,
-        third_place_combinations,
+    ai_score_timeline = (
+        timeline_table(ais, results, teams, matches, knockout_matchups, third_place_combinations)
+        if selected_ais
+        else pd.DataFrame(columns=full_rank_timeline.columns)
+    )
+    ai_score_timeline = (
+        ai_score_timeline[ai_score_timeline["User name"].isin(selected_ais)]
+        if not ai_score_timeline.empty
+        else ai_score_timeline
     )
     score_timeline = pd.concat(
         [human_score_timeline, ai_score_timeline],
@@ -5132,6 +5720,8 @@ def render_timelines(
             y_values=rank_ticks,
             color_domain=timeline_color_domain,
         )
+
+
 def render_human_vs_ai(
     users: pd.DataFrame,
     results: pd.DataFrame,
@@ -5141,9 +5731,32 @@ def render_human_vs_ai(
     third_place_combinations: pd.DataFrame,
 ) -> None:
     participants = leaderboard_participants(users, include_ai=True)
+    prediction_states = prediction_states_for_participants(
+        participants, teams, matches, knockout_matchups, third_place_combinations
+    )
+    prediction_scores = {
+        str(participant["user_id"]): score_lookup(participant["predictions"])
+        for participant in participants
+    }
+    prediction_stage_entrants = {
+        user_id: stage_entrants_by_stage(state["resolved_matches"])
+        for user_id, state in prediction_states.items()
+    }
+    match_records = matches.to_dict("records")
     match_ids = completed_match_ids(results, matches)
     scoped_results = results_through_match(results, matches, match_ids[-1] if match_ids else None)
-    snapshot = leaderboard_snapshot(participants, scoped_results, teams, matches, knockout_matchups, third_place_combinations)
+    snapshot = leaderboard_snapshot(
+        participants,
+        scoped_results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+        precomputed_prediction_states=prediction_states,
+        precomputed_prediction_scores=prediction_scores,
+        precomputed_prediction_stage_entrants=prediction_stage_entrants,
+        precomputed_match_records=match_records,
+    )
     group_stage_results = results_for_stage(results, matches, GROUP_STAGE)
     group_stage_snapshot = leaderboard_snapshot(
         participants,
@@ -5152,6 +5765,10 @@ def render_human_vs_ai(
         matches,
         knockout_matchups,
         third_place_combinations,
+        precomputed_prediction_states=prediction_states,
+        precomputed_prediction_scores=prediction_scores,
+        precomputed_prediction_stage_entrants=prediction_stage_entrants,
+        precomputed_match_records=match_records,
     )
     if snapshot.empty:
         st.info("No predictions available.")
