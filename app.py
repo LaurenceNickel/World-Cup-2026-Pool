@@ -833,6 +833,70 @@ def apply_visual_theme() -> None:
             overflow-x: auto;
         }
 
+        .endgame-position-scroll {
+            width: 100%;
+            overflow-x: auto;
+            margin: 0.35rem 0 1.25rem;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .endgame-position-table {
+            min-width: 680px;
+            width: max-content;
+            border-collapse: separate;
+            border-spacing: 0;
+            overflow: hidden;
+            border: 1px solid var(--pool-border);
+            border-radius: 8px;
+            background: var(--pool-panel);
+            box-shadow: 0 10px 28px color-mix(in srgb, var(--pool-primary) 6%, transparent);
+            color: #000000;
+            font-size: 0.86rem;
+        }
+
+        .endgame-position-table th,
+        .endgame-position-table td {
+            min-width: 4.1rem;
+            padding: 0.58rem 0.7rem;
+            border-right: 1px solid var(--pool-border);
+            border-bottom: 1px solid var(--pool-border);
+            text-align: center;
+            vertical-align: middle;
+            white-space: nowrap;
+        }
+
+        .endgame-position-table th:first-child,
+        .endgame-position-table td:first-child {
+            position: sticky;
+            left: 0;
+            z-index: 1;
+            min-width: 9.5rem;
+            max-width: 13rem;
+            text-align: left;
+            background: #ffffff;
+            white-space: normal;
+        }
+
+        .endgame-position-table th {
+            background: #f7f9fc;
+            color: #000000;
+            font-weight: 700;
+        }
+
+        .endgame-position-table th:first-child {
+            z-index: 2;
+            background: #f7f9fc;
+        }
+
+        .endgame-position-table th:last-child,
+        .endgame-position-table td:last-child {
+            border-right: 0;
+        }
+
+        .endgame-position-table tbody tr:last-child td {
+            border-bottom: 0;
+        }
+
         .pool-table tr:last-child td {
             border-bottom: 0;
         }
@@ -6186,48 +6250,35 @@ def render_endgame_position_heatmap(
         .tolist()
     )
     position_order = sorted(probability_table["Position"].unique().tolist())
-    base = alt.Chart(probability_table).encode(
-        x=alt.X("Position:O", title="Final position", sort=position_order),
-        y=alt.Y("User name:N", title=None, sort=user_order),
-        tooltip=[
-            "User name",
-            alt.Tooltip("Current rank:Q", format="d"),
-            alt.Tooltip("Position:Q", format="d"),
-            alt.Tooltip("Probability:Q", format=".1f"),
-        ],
+    probability_lookup = {
+        (str(row["User name"]), int(row["Position"])): float(row["Probability"])
+        for row in probability_table.to_dict("records")
+    }
+    headers = ["<th>User name</th>", *[f"<th>{position}</th>" for position in position_order]]
+    rows = []
+    for user_name in user_order:
+        cells = [f"<td>{html.escape(user_name)}</td>"]
+        for position in position_order:
+            probability = probability_lookup.get((user_name, position), 0.0)
+            intensity = max(0.0, min(1.0, probability / 100))
+            blue = int(245 - (143 * intensity))
+            green = int(249 - (113 * intensity))
+            red = int(247 - (240 * intensity))
+            text_color = "#ffffff" if probability >= 35 else DEFAULT_THEME["text"]
+            cells.append(
+                f'<td style="background: rgb({red}, {green}, {blue}); color: {text_color};">'
+                f"{probability:.1f}%"
+                "</td>"
+            )
+        rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    st.markdown(
+        '<div class="endgame-position-scroll">'
+        f'<table class="endgame-position-table"><thead><tr>{"".join(headers)}</tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
+        "</div>",
+        unsafe_allow_html=True,
     )
-    heatmap = base.mark_rect().encode(
-        color=alt.Color(
-            "Probability:Q",
-            title="Scenario share (%)",
-            scale=alt.Scale(scheme="blues", domain=[0, 100]),
-        )
-    )
-    labels = base.mark_text(fontSize=12).encode(
-        text="Label:N",
-        color=alt.condition(
-            alt.datum.Probability >= 35,
-            alt.value("#ffffff"),
-            alt.value(DEFAULT_THEME["text"]),
-        ),
-    )
-    chart = (
-        (heatmap + labels)
-        .properties(
-            width=max(640, 54 * len(position_order)),
-            height=max(220, 34 * len(user_order)),
-        )
-        .configure_view(strokeWidth=0)
-        .configure_axis(
-            labelColor=DEFAULT_THEME["primary"],
-            titleColor=DEFAULT_THEME["primary"],
-            tickColor=DEFAULT_THEME["primary"],
-            domainColor=DEFAULT_THEME["primary"],
-        )
-        .configure_legend(labelColor=DEFAULT_THEME["primary"], titleColor=DEFAULT_THEME["primary"])
-        .configure(background="transparent")
-    )
-    st.altair_chart(chart)
 
 
 def winning_scenarios_by_user(
