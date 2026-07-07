@@ -4729,18 +4729,7 @@ def render_default_leaderboard(
             )
         cache_status = write_leaderboard_cache(cache_key, str(checkpoint["checkpoint_id"]), snapshot)
     display_leaderboard_table(snapshot, include_change=True)
-    cache_target = google_sheets_target_label()
-    if cache_status == "hit":
-        st.caption(
-            f"Loaded from Google Sheets cache sheet `{LEADERBOARD_CACHE_SHEET}` in {cache_target}."
-        )
-    elif cache_status.startswith("verified:"):
-        row_count = cache_status.split(":", 1)[1]
-        st.caption(
-            f"Saved and verified {row_count} rows in Google Sheets cache sheet "
-            f"`{LEADERBOARD_CACHE_SHEET}` in {cache_target}."
-        )
-    elif cache_status == "disabled":
+    if cache_status == "disabled":
         st.warning(
             "Leaderboard cache was not written because `GOOGLE_SHEETS_BACKEND` is not enabled "
             "for this running app."
@@ -4748,11 +4737,13 @@ def render_default_leaderboard(
     elif cache_status == "empty":
         st.info("Leaderboard cache was not written because the computed snapshot was empty.")
     elif cache_status == "not_visible":
+        cache_target = google_sheets_target_label()
         st.error(
             f"The cache write call completed, but `{LEADERBOARD_CACHE_SHEET}` in {cache_target} "
             "did not contain the written cache key on immediate read-back."
         )
     elif cache_status.startswith("error:"):
+        cache_target = google_sheets_target_label()
         st.error(f"Leaderboard cache write failed for {cache_target}: {cache_status.removeprefix('error:')}")
 
 
