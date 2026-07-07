@@ -3883,21 +3883,37 @@ def leaderboard_snapshot(
     precomputed_prediction_scores: dict[str, dict[str, dict[str, Any]]] | None = None,
     precomputed_prediction_stage_entrants: dict[str, dict[str, set[str]]] | None = None,
     precomputed_match_records: list[dict[str, Any]] | None = None,
+    precomputed_actual_state: dict[str, Any] | None = None,
+    precomputed_completed_groups: set[str] | None = None,
+    precomputed_actual_scores: dict[str, dict[str, Any]] | None = None,
+    precomputed_actual_stage_entrants: dict[str, set[str]] | None = None,
 ) -> pd.DataFrame:
     rows = []
-    actual_state = derive_tournament_state(
-        teams,
-        matches,
-        results,
-        knockout_matchups,
-        third_place_combinations,
-        use_cards=True,
-        require_confirmed_placements=True,
+    actual_state = (
+        precomputed_actual_state
+        if precomputed_actual_state is not None
+        else derive_tournament_state(
+            teams,
+            matches,
+            results,
+            knockout_matchups,
+            third_place_combinations,
+            use_cards=True,
+            require_confirmed_placements=True,
+        )
     )
-    completed_groups = completed_groups_lookup(results, matches, teams)
-    actual_scores = score_lookup(results)
+    completed_groups = (
+        precomputed_completed_groups
+        if precomputed_completed_groups is not None
+        else completed_groups_lookup(results, matches, teams)
+    )
+    actual_scores = precomputed_actual_scores if precomputed_actual_scores is not None else score_lookup(results)
     match_records = precomputed_match_records if precomputed_match_records is not None else matches.to_dict("records")
-    actual_stage_entrants = stage_entrants_by_stage(actual_state["resolved_matches"])
+    actual_stage_entrants = (
+        precomputed_actual_stage_entrants
+        if precomputed_actual_stage_entrants is not None
+        else stage_entrants_by_stage(actual_state["resolved_matches"])
+    )
     prediction_stage_entrants_by_user = dict(precomputed_prediction_stage_entrants or {})
     if precomputed_prediction_stage_entrants is None:
         prediction_stage_entrants_by_user = {
@@ -5874,6 +5890,453 @@ def render_prediction_analysis(
     )
 
 
+ENDGAME_MAX_SCENARIOS = 32768
+
+
+def result_rows_frame(score_rows: dict[str, dict[str, Any]]) -> pd.DataFrame:
+    return normalize_results(pd.DataFrame(score_rows.values()))
+
+
+def scenario_result_row(match_id: str, home_wins: bool) -> dict[str, Any]:
+    return {
+        "match_id": match_id,
+        "home_goals": 1 if home_wins else 0,
+        "away_goals": 0 if home_wins else 1,
+        PENALTY_WINNER_COLUMN: "",
+        **{column: "" for column in CARD_COLUMNS},
+    }
+
+
+def enumerate_endgame_scenarios(
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+    max_scenarios: int = ENDGAME_MAX_SCENARIOS,
+) -> tuple[list[dict[str, Any]], bool]:
+    initial_rows = {
+        str(row["match_id"]): row
+        for row in normalize_results(results).to_dict("records")
+    }
+    initial_results = result_rows_frame(initial_rows)
+    initial_state = derive_tournament_state(
+        teams,
+        matches,
+        initial_results,
+        knockout_matchups,
+        third_place_combinations,
+        use_cards=True,
+        require_confirmed_placements=True,
+    )
+    matchup_rows = {
+        str(row["match_id"]): row
+        for row in knockout_matchups.to_dict("records")
+    }
+    future_matches = [
+        match
+        for match in matches.to_dict("records")
+        if str(match.get("stage", "")) in KNOCKOUT_STAGES
+        and completed_score(initial_rows.get(str(match["match_id"]))) is None
+    ]
+    scenarios: list[dict[str, Any]] = []
+    truncated = False
+
+    def resolved_teams(match: dict[str, Any], winners: dict[str, str], losers: dict[str, str]) -> tuple[str, str]:
+        match_id = str(match["match_id"])
+        matchup = matchup_rows.get(match_id, {})
+        home_slot = str(matchup.get("home_team", "")).strip()
+        away_slot = str(matchup.get("away_team", "")).strip()
+        home_id = resolve_slot(
+            home_slot,
+            away_slot,
+            initial_state["group_standings"],
+            initial_state["combination_row"],
+            winners,
+            losers,
+            initial_state["confirmed_position_slots"],
+        )
+        away_id = resolve_slot(
+            away_slot,
+            home_slot,
+            initial_state["group_standings"],
+            initial_state["combination_row"],
+            winners,
+            losers,
+            initial_state["confirmed_position_slots"],
+        )
+        return str(home_id or ""), str(away_id or "")
+
+    def walk(
+        match_index: int,
+        score_rows: dict[str, dict[str, Any]],
+        winners: dict[str, str],
+        losers: dict[str, str],
+        events: list[dict[str, Any]],
+    ) -> None:
+        nonlocal truncated
+        if len(scenarios) >= max_scenarios:
+            truncated = True
+            return
+
+        if match_index >= len(future_matches):
+            scenario_results = result_rows_frame(score_rows)
+            scenarios.append(
+                {
+                    "scenario_id": len(scenarios) + 1,
+                    "results": scenario_results,
+                    "events": events,
+                }
+            )
+            return
+
+        match = future_matches[match_index]
+        match_id = str(match["match_id"])
+        home_id, away_id = resolved_teams(match, winners, losers)
+        if not home_id or not away_id:
+            return
+        for home_wins, winner_id, loser_id in [(True, home_id, away_id), (False, away_id, home_id)]:
+            next_rows = {key: value.copy() for key, value in score_rows.items()}
+            next_rows[match_id] = scenario_result_row(match_id, home_wins)
+            next_winners = {**winners, match_id: winner_id}
+            next_losers = {**losers, match_id: loser_id}
+            walk(
+                match_index + 1,
+                next_rows,
+                next_winners,
+                next_losers,
+                [
+                    *events,
+                    {
+                        "match_id": match_id,
+                        "stage": str(match.get("stage", "")),
+                        "winner": winner_id,
+                        "loser": loser_id,
+                    },
+                ],
+            )
+
+    walk(0, initial_rows, dict(initial_state["winners"]), dict(initial_state["losers"]), [])
+    return scenarios, truncated
+
+
+def scenario_event_label(event: dict[str, Any], teams: pd.DataFrame) -> str:
+    winner = team_name(str(event.get("winner", "")), teams)
+    loser = team_name(str(event.get("loser", "")), teams)
+    stage = str(event.get("stage", ""))
+    if str(event.get("match_id", "")) == FINAL_MATCH_ID:
+        return f"{winner} wins the World Cup"
+    if str(event.get("match_id", "")) == THIRD_PLACE_MATCH_ID:
+        return f"{winner} wins the third-place match"
+    return f"{winner} beats {loser} in the {stage_label(stage)}"
+
+
+def scenario_path_text(events: list[dict[str, Any]], teams: pd.DataFrame) -> str:
+    ordered_events = sorted(events, key=scenario_event_sort_key)
+    return "; ".join(scenario_event_label(event, teams) for event in ordered_events) or "Current standings hold"
+
+
+def scenario_stage_entrants(
+    initial_stage_entrants: dict[str, set[str]],
+    events: list[dict[str, Any]],
+) -> dict[str, set[str]]:
+    entrants = {stage: set(values) for stage, values in initial_stage_entrants.items()}
+    advancement_stage = {
+        "round_of_32": "round_of_16",
+        "round_of_16": "quarter_final",
+        "quarter_final": "semi_final",
+        "semi_final": "final",
+    }
+    for event in events:
+        next_stage = advancement_stage.get(str(event.get("stage", "")))
+        winner = str(event.get("winner", "")).strip()
+        if next_stage and winner:
+            entrants.setdefault(next_stage, set()).add(winner)
+    return entrants
+
+
+def scenario_winners(initial_winners: dict[str, str], events: list[dict[str, Any]]) -> dict[str, str]:
+    winners = dict(initial_winners)
+    for event in events:
+        match_id = str(event.get("match_id", "")).strip()
+        winner = str(event.get("winner", "")).strip()
+        if match_id and winner:
+            winners[match_id] = winner
+    return winners
+
+
+def endgame_scenario_rankings(
+    participants: list[dict[str, Any]],
+    scenarios: list[dict[str, Any]],
+    current_snapshot: pd.DataFrame,
+    current_state: dict[str, Any],
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+) -> pd.DataFrame:
+    rows = []
+    prediction_states = prediction_states_for_participants(
+        participants, teams, matches, knockout_matchups, third_place_combinations
+    )
+    prediction_stage_entrants = {
+        user_id: stage_entrants_by_stage(state["resolved_matches"])
+        for user_id, state in prediction_states.items()
+    }
+    prediction_winners = {
+        user_id: state["winners"]
+        for user_id, state in prediction_states.items()
+    }
+    fixed_points = {
+        str(row["user_id"]): int(row["match_score_points"]) + int(row["group_standings_points"])
+        for row in current_snapshot.to_dict("records")
+    }
+    user_names = {
+        str(participant["user_id"]): str(participant["user_name"])
+        for participant in participants
+    }
+    initial_stage_entrants = stage_entrants_by_stage(current_state["resolved_matches"])
+    initial_winners = current_state["winners"]
+    for scenario in scenarios:
+        actual_entrants = scenario_stage_entrants(initial_stage_entrants, scenario["events"])
+        actual_winners = scenario_winners(initial_winners, scenario["events"])
+        scenario_rows = []
+        for participant in participants:
+            user_id = str(participant["user_id"])
+            total_points = fixed_points.get(user_id, 0)
+            for stage, stage_points in KNOCKOUT_STAGE_POINTS.items():
+                actual_stage = actual_entrants.get(stage, set())
+                if actual_stage:
+                    total_points += len(prediction_stage_entrants[user_id].get(stage, set()) & actual_stage) * stage_points
+            predicted_third_place = prediction_winners[user_id].get(THIRD_PLACE_MATCH_ID)
+            actual_third_place = actual_winners.get(THIRD_PLACE_MATCH_ID)
+            if predicted_third_place and predicted_third_place == actual_third_place:
+                total_points += THIRD_PLACE_WINNER_POINTS
+            predicted_winner = prediction_winners[user_id].get(FINAL_MATCH_ID)
+            actual_winner = actual_winners.get(FINAL_MATCH_ID)
+            if predicted_winner and predicted_winner == actual_winner:
+                total_points += CHAMPION_POINTS
+            scenario_rows.append(
+                {
+                    "user_id": user_id,
+                    "user_name": user_names.get(user_id, user_id),
+                    "total_points": total_points,
+                }
+            )
+        scenario_snapshot = add_rank(pd.DataFrame(scenario_rows), "total_points")
+        for row in scenario_snapshot.to_dict("records"):
+            rows.append(
+                {
+                    "scenario_id": int(scenario["scenario_id"]),
+                    "user_id": str(row["user_id"]),
+                    "user_name": str(row["user_name"]),
+                    "rank": int(row["rank"]),
+                    "total_points": int(row["total_points"]),
+                }
+            )
+    return pd.DataFrame(rows, columns=["scenario_id", "user_id", "user_name", "rank", "total_points"])
+
+
+def endgame_position_probability_table(
+    scenario_rankings: pd.DataFrame,
+    current_snapshot: pd.DataFrame,
+) -> pd.DataFrame:
+    columns = ["User name", "Current rank", "Position", "Probability", "Label"]
+    if scenario_rankings.empty or current_snapshot.empty:
+        return pd.DataFrame(columns=columns)
+
+    total_scenarios = scenario_rankings["scenario_id"].nunique()
+    max_rank = int(scenario_rankings["rank"].max())
+    current_rows = current_snapshot.sort_values(["rank", "user_name"]).to_dict("records")
+    rows = []
+    for current in current_rows:
+        user_id = str(current["user_id"])
+        user_rows = scenario_rankings[scenario_rankings["user_id"].astype(str).eq(user_id)]
+        counts = user_rows["rank"].value_counts().to_dict()
+        for position in range(1, max_rank + 1):
+            probability = 100 * counts.get(position, 0) / total_scenarios if total_scenarios else 0
+            rows.append(
+                {
+                    "User name": str(current["user_name"]),
+                    "Current rank": int(current["rank"]),
+                    "Position": position,
+                    "Probability": probability,
+                    "Label": f"{probability:.1f}%",
+                }
+            )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def render_endgame_position_heatmap(
+    scenario_rankings: pd.DataFrame,
+    current_snapshot: pd.DataFrame,
+) -> None:
+    probability_table = endgame_position_probability_table(scenario_rankings, current_snapshot)
+    if probability_table.empty:
+        st.info("No final-position probabilities are available yet.")
+        return
+
+    user_order = (
+        current_snapshot.sort_values(["rank", "user_name"])["user_name"]
+        .astype(str)
+        .tolist()
+    )
+    position_order = sorted(probability_table["Position"].unique().tolist())
+    base = alt.Chart(probability_table).encode(
+        x=alt.X("Position:O", title="Final position", sort=position_order),
+        y=alt.Y("User name:N", title=None, sort=user_order),
+        tooltip=[
+            "User name",
+            alt.Tooltip("Current rank:Q", format="d"),
+            alt.Tooltip("Position:Q", format="d"),
+            alt.Tooltip("Probability:Q", format=".1f"),
+        ],
+    )
+    heatmap = base.mark_rect().encode(
+        color=alt.Color(
+            "Probability:Q",
+            title="Scenario share (%)",
+            scale=alt.Scale(scheme="blues", domain=[0, 100]),
+        )
+    )
+    labels = base.mark_text(fontSize=12).encode(
+        text="Label:N",
+        color=alt.condition(
+            alt.datum.Probability >= 35,
+            alt.value("#ffffff"),
+            alt.value(DEFAULT_THEME["text"]),
+        ),
+    )
+    chart = (
+        (heatmap + labels)
+        .properties(height=max(220, 34 * len(user_order)))
+        .configure_view(strokeWidth=0)
+        .configure_axis(
+            labelColor=DEFAULT_THEME["primary"],
+            titleColor=DEFAULT_THEME["primary"],
+            tickColor=DEFAULT_THEME["primary"],
+            domainColor=DEFAULT_THEME["primary"],
+        )
+        .configure_legend(labelColor=DEFAULT_THEME["primary"], titleColor=DEFAULT_THEME["primary"])
+        .configure(background="transparent")
+    )
+    st.altair_chart(chart, width="stretch")
+
+
+def winning_scenarios_by_user(
+    scenarios: list[dict[str, Any]],
+    scenario_rankings: pd.DataFrame,
+) -> dict[str, list[dict[str, Any]]]:
+    scenarios_by_id = {int(scenario["scenario_id"]): scenario for scenario in scenarios}
+    winners: dict[str, list[dict[str, Any]]] = {}
+    if scenario_rankings.empty:
+        return winners
+    winner_rows = scenario_rankings[scenario_rankings["rank"].eq(1)]
+    for row in winner_rows.to_dict("records"):
+        user_id = str(row["user_id"])
+        scenario = scenarios_by_id.get(int(row["scenario_id"]))
+        if scenario is not None:
+            winners.setdefault(user_id, []).append(scenario)
+    return winners
+
+
+def event_key(event: dict[str, Any]) -> tuple[str, str]:
+    return str(event.get("match_id", "")), str(event.get("winner", ""))
+
+
+def match_number(match_id: Any) -> int:
+    match = re.search(r"\d+", str(match_id))
+    return int(match.group(0)) if match else 9999
+
+
+def scenario_event_sort_key(event: dict[str, Any]) -> tuple[int, int]:
+    stage = str(event.get("stage", ""))
+    stage_index = KNOCKOUT_STAGES.index(stage) if stage in KNOCKOUT_STAGES else len(KNOCKOUT_STAGES)
+    return stage_index, match_number(event.get("match_id", ""))
+
+
+def render_user_winning_scenarios(
+    participants: list[dict[str, Any]],
+    scenarios: list[dict[str, Any]],
+    scenario_rankings: pd.DataFrame,
+    current_snapshot: pd.DataFrame,
+    teams: pd.DataFrame,
+) -> None:
+    winners = winning_scenarios_by_user(scenarios, scenario_rankings)
+    total_scenarios = len(scenarios)
+    ordered_users = []
+    for user in current_snapshot.to_dict("records"):
+        user_id = str(user["user_id"])
+        winning = winners.get(user_id, [])
+        probability = 100 * len(winning) / total_scenarios if total_scenarios else 0
+        ordered_users.append({**user, "winning_scenarios": winning, "win_probability": probability})
+    ordered_users.sort(
+        key=lambda row: (
+            -float(row["win_probability"]),
+            int(row["rank"]),
+            str(row["user_name"]),
+        )
+    )
+    for user in ordered_users:
+        user_name = str(user["user_name"])
+        winning = user["winning_scenarios"]
+        probability = float(user["win_probability"])
+        with st.expander(f"{user_name}: {probability:.1f}% chance to finish first", expanded=probability > 0):
+            if not winning:
+                st.write("No remaining outcome combination leaves this participant in first place.")
+                continue
+
+            counts: dict[tuple[str, str], int] = {}
+            labels: dict[tuple[str, str], str] = {}
+            events_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+            for scenario in winning:
+                for event in scenario["events"]:
+                    key = event_key(event)
+                    counts[key] = counts.get(key, 0) + 1
+                    labels[key] = scenario_event_label(event, teams)
+                    events_by_key.setdefault(key, event)
+
+            required_keys = [
+                key
+                for key, count in counts.items()
+                if count == len(winning)
+            ]
+            if required_keys:
+                st.markdown("Required in every winning path:")
+                for key in sorted(required_keys, key=lambda item: scenario_event_sort_key(events_by_key[item])):
+                    st.write(f"- {labels[key]}")
+
+            common_rows = [
+                {
+                    "Outcome": labels[key],
+                    "Winning paths": count,
+                    "Share of winning paths": f"{100 * count / len(winning):.1f}%",
+                }
+                for key, count in counts.items()
+                if count < len(winning)
+            ]
+            if common_rows:
+                if required_keys:
+                    st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
+                st.markdown("Most common events in winning paths:")
+                common_table = pd.DataFrame(common_rows).sort_values(
+                    ["Winning paths", "Outcome"],
+                    ascending=[False, True],
+                ).head(8)
+                render_centered_dataframe(common_table, centered_columns={"Outcome"}, bold_columns={"Share of winning paths"})
+
+            if required_keys or common_rows:
+                st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
+            path_rows = [
+                {
+                    "Required outcomes": scenario_path_text(scenario["events"], teams),
+                }
+                for scenario in winning
+            ]
+            st.markdown("Winning paths:")
+            st.dataframe(pd.DataFrame(path_rows), hide_index=True, use_container_width=True)
+
+
 def render_endgame_scenarios(
     users: pd.DataFrame,
     results: pd.DataFrame,
@@ -5882,69 +6345,68 @@ def render_endgame_scenarios(
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
 ) -> None:
-    completed_ids = completed_match_ids(results, matches)
-    if not completed_ids:
-        st.info("Endgame scenarios will appear from the quarter-finals onward!")
-        return
-    last_stage = str(matches[matches["match_id"].eq(completed_ids[-1])].iloc[0]["stage"])
-    if last_stage not in ["quarter_final", "semi_final", "third_place", "final"]:
-        st.info("Endgame scenarios appear from the quarter-finals onward.")
-        return
     participants = leaderboard_participants(users, include_ai=False)
-    snapshot = snapshot_with_rank_change(
-        participants, results, matches, completed_ids[-1], teams, knockout_matchups, third_place_combinations
-    )
-    actual_state = derive_tournament_state(
-        teams,
-        matches,
-        results,
-        knockout_matchups,
-        third_place_combinations,
-        use_cards=True,
-        require_confirmed_placements=True,
-    )
-    result_rows = score_lookup(results)
-    remaining_group_matches = sum(
-        1
-        for _, match in matches[matches["stage"].eq(GROUP_STAGE)].iterrows()
-        if completed_score(result_rows.get(match["match_id"])) is None
-    )
-    incomplete_groups = sum(0 if group_is_complete(group, matches, results, teams) else 1 for group in GROUPS)
-    teams_per_group = int(teams.groupby("group").size().max()) if not teams.empty else 0
-    future_stage_bonus = 0
-    for stage, stage_points in KNOCKOUT_STAGE_POINTS.items():
-        expected_entrants = len(matches[matches["stage"].eq(stage)]) * 2
-        known_entrants = len(stage_entrants(actual_state["resolved_matches"], stage))
-        future_stage_bonus += max(0, expected_entrants - known_entrants) * stage_points
-    if not actual_state["winners"].get(THIRD_PLACE_MATCH_ID):
-        future_stage_bonus += THIRD_PLACE_WINNER_POINTS
-    if not actual_state["winners"].get(FINAL_MATCH_ID):
-        future_stage_bonus += CHAMPION_POINTS
-    max_group_match_points = MATCH_OUTCOME_POINTS + MATCH_HOME_GOALS_POINTS + MATCH_AWAY_GOALS_POINTS
-    remaining_possible = (
-        remaining_group_matches * max_group_match_points
-        + incomplete_groups * teams_per_group * GROUP_STANDING_POSITION_POINTS
-        + future_stage_bonus
-    )
-    leader_points = int(snapshot["total_points"].max()) if not snapshot.empty else 0
-    rows = []
-    for _, row in snapshot.iterrows():
-        maximum = int(row["total_points"]) + remaining_possible
-        rows.append(
-            {
-                "User name": row["user_name"],
-                "Current points": int(row["total_points"]),
-                "Maximum possible points": maximum,
-                "Still can win?": "Yes" if maximum >= leader_points else "No",
-            }
+    if not participants:
+        st.info("Endgame scenarios will appear once participants have submitted predictions.")
+        return
+
+    with st.spinner("Calculating remaining outcome combinations..."):
+        scenarios, truncated = enumerate_endgame_scenarios(
+            results,
+            teams,
+            matches,
+            knockout_matchups,
+            third_place_combinations,
         )
-    table = add_rank(pd.DataFrame(rows), "Maximum possible points")
-    render_centered_dataframe(table.rename(columns={"rank": "Rank"}))
-    contenders = table[table["Still can win?"].eq("Yes")]
-    for _, row in contenders.iterrows():
-        if int(row["Current points"]) < leader_points:
-            gap = leader_points - int(row["Current points"])
-            st.write(f"{row['User name']} can still overtake the leader by gaining at least {gap + 1} more points than the current leader over the remaining scoring opportunities.")
+        current_snapshot = leaderboard_snapshot(
+            participants,
+            results,
+            teams,
+            matches,
+            knockout_matchups,
+            third_place_combinations,
+        )
+        current_state = derive_tournament_state(
+            teams,
+            matches,
+            results,
+            knockout_matchups,
+            third_place_combinations,
+            use_cards=True,
+            require_confirmed_placements=True,
+        )
+        scenario_rankings = endgame_scenario_rankings(
+            participants,
+            scenarios,
+            current_snapshot,
+            current_state,
+            teams,
+            matches,
+            knockout_matchups,
+            third_place_combinations,
+        )
+
+    if not scenarios or scenario_rankings.empty:
+        st.info("No remaining endgame outcome combinations could be resolved from the current bracket.")
+        return
+
+    st.subheader("Potential Final Positions")
+    render_endgame_position_heatmap(scenario_rankings, current_snapshot)
+    scenario_count = len(scenarios)
+    scenario_label = f"{scenario_count:,} remaining knockout outcome combinations"
+    if truncated:
+        scenario_label = f"First {scenario_label} shown because the scenario limit was reached"
+    st.caption(f"Based on {scenario_label}, weighted equally.")
+
+    st.divider()
+    st.subheader("Winning Scenarios")
+    render_user_winning_scenarios(
+        participants,
+        scenarios,
+        scenario_rankings,
+        current_snapshot,
+        teams,
+    )
 
 
 def render_leaderboard(
