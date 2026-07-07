@@ -829,6 +829,10 @@ def apply_visual_theme() -> None:
             background: transparent;
         }
 
+        div[data-testid="stVegaLiteChart"] {
+            overflow-x: auto;
+        }
+
         .pool-table tr:last-child td {
             border-bottom: 0;
         }
@@ -6209,7 +6213,10 @@ def render_endgame_position_heatmap(
     )
     chart = (
         (heatmap + labels)
-        .properties(height=max(220, 34 * len(user_order)))
+        .properties(
+            width=max(640, 54 * len(position_order)),
+            height=max(220, 34 * len(user_order)),
+        )
         .configure_view(strokeWidth=0)
         .configure_axis(
             labelColor=DEFAULT_THEME["primary"],
@@ -6220,7 +6227,7 @@ def render_endgame_position_heatmap(
         .configure_legend(labelColor=DEFAULT_THEME["primary"], titleColor=DEFAULT_THEME["primary"])
         .configure(background="transparent")
     )
-    st.altair_chart(chart, width="stretch")
+    st.altair_chart(chart)
 
 
 def winning_scenarios_by_user(
