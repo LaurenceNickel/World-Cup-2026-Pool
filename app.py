@@ -1181,7 +1181,7 @@ def apply_visual_theme() -> None:
         .endgame-mini-table td {
             padding: 0.35rem 0.25rem;
             border-bottom: 1px solid var(--pool-border);
-            text-align: left;
+            text-align: center;
             vertical-align: middle;
         }
 
@@ -1197,14 +1197,6 @@ def apply_visual_theme() -> None:
             white-space: nowrap;
         }
 
-        .endgame-mini-table th:nth-child(3),
-        .endgame-mini-table td:nth-child(3),
-        .endgame-mini-table th:nth-child(4),
-        .endgame-mini-table td:nth-child(4) {
-            text-align: right;
-            white-space: nowrap;
-        }
-
         .endgame-consequence-list {
             margin: 0.15rem 0 0;
             padding-left: 1rem;
@@ -1217,6 +1209,13 @@ def apply_visual_theme() -> None:
             color: var(--pool-muted);
             font-size: 0.84rem;
             font-weight: 600;
+        }
+
+        .endgame-odds-swing-heading {
+            margin: 1.45rem 0 0.45rem;
+            color: var(--pool-primary);
+            font-size: 1rem;
+            font-weight: 800;
         }
 
         @media (max-width: 900px) {
@@ -7036,11 +7035,99 @@ def limited_user_names_html(
     return ", ".join(labels)
 
 
+def results_with_match_winner(
+    results: pd.DataFrame,
+    match_id: str,
+    winner_id: str,
+    home_id: str,
+) -> pd.DataFrame:
+    normalized = normalize_results(results)
+    branch_rows = normalized[~normalized["match_id"].astype(str).eq(str(match_id))].copy()
+    result_row = scenario_result_row(str(match_id), str(winner_id) == str(home_id))
+    return normalize_results(pd.concat([branch_rows, pd.DataFrame([result_row])], ignore_index=True))
+
+
+def leaderboard_snapshot_after_match_winner(
+    participants: list[dict[str, Any]],
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+    match_id: str,
+    winner_id: str,
+    home_id: str,
+) -> pd.DataFrame:
+    branch_results = results_with_match_winner(results, match_id, winner_id, home_id)
+    return leaderboard_snapshot(
+        participants,
+        branch_results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+    )
+
+
+def snapshot_rows_by_user(snapshot: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    if snapshot.empty or "user_id" not in snapshot.columns:
+        return {}
+    return {str(row["user_id"]): row for row in snapshot.to_dict("records")}
+
+
+def format_rank_delta(delta: int) -> str:
+    if delta > 0:
+        return f"+{delta} place{'s' if delta != 1 else ''}"
+    if delta < 0:
+        return f"{delta} place{'s' if delta != -1 else ''}"
+    return "No change"
+
+
+def format_points_delta(delta: int) -> str:
+    if delta > 0:
+        return f"+{delta} pts"
+    if delta < 0:
+        return f"{delta} pts"
+    return "0 pts"
+
+
+def branch_top_leaderboard_table_html(
+    branch_snapshot: pd.DataFrame,
+    current_snapshot: pd.DataFrame,
+    limit: int = 5,
+) -> str:
+    if branch_snapshot.empty:
+        return '<div class="endgame-empty-note">No branch leaderboard available.</div>'
+    current_rows = snapshot_rows_by_user(current_snapshot)
+    rows = branch_snapshot.sort_values(["rank", "user_name"]).head(limit).to_dict("records")
+    body = []
+    for row in rows:
+        user_id = str(row["user_id"])
+        points = to_int(row.get("total_points", 0))
+        current_points = to_int(current_rows.get(user_id, {}).get("total_points", points))
+        body.append(
+            "<tr>"
+            f"<td>{to_int(row.get('rank', 0))}</td>"
+            f"<td>{html.escape(str(row['user_name']))}</td>"
+            f"<td>{points}</td>"
+            f"<td>{format_points_delta(points - current_points)}</td>"
+            "</tr>"
+        )
+    return (
+        '<table class="endgame-mini-table">'
+        "<thead><tr><th>Rank</th><th>User</th><th>Points</th><th>Change</th></tr></thead>"
+        f"<tbody>{''.join(body)}</tbody>"
+        "</table>"
+    )
+
+
 def branch_consequence_items(
     all_stats: dict[str, dict[str, Any]],
     branch_stats: dict[str, dict[str, Any]],
     now_first: dict[str, float],
     branch_first: dict[str, float],
+    current_snapshot: pd.DataFrame,
+    branch_snapshot: pd.DataFrame,
     user_names: dict[str, str],
     ordered_ids: list[str],
 ) -> list[str]:
@@ -7075,13 +7162,55 @@ def branch_consequence_items(
         lambda user_id: all_stats.get(user_id, {}).get("top_pct", 0.0) > epsilon
         and branch_stats.get(user_id, {}).get("top_pct", 0.0) <= epsilon
     )
+    current_rows = snapshot_rows_by_user(current_snapshot)
+    branch_rows = snapshot_rows_by_user(branch_snapshot)
+    shared_ids = [user_id for user_id in ordered_ids if user_id in current_rows and user_id in branch_rows]
+
+    takes_first = [
+        user_id
+        for user_id in shared_ids
+        if to_int(current_rows[user_id].get("rank", 999)) > 1
+        and to_int(branch_rows[user_id].get("rank", 999)) == 1
+    ]
+    enters_top_five = [
+        user_id
+        for user_id in shared_ids
+        if to_int(current_rows[user_id].get("rank", 999)) > 5
+        and to_int(branch_rows[user_id].get("rank", 999)) <= 5
+    ]
+    drops_from_top_five = [
+        user_id
+        for user_id in shared_ids
+        if to_int(current_rows[user_id].get("rank", 999)) <= 5
+        and to_int(branch_rows[user_id].get("rank", 999)) > 5
+    ]
+    rank_gains = {
+        user_id: to_int(current_rows[user_id].get("rank", 999)) - to_int(branch_rows[user_id].get("rank", 999))
+        for user_id in shared_ids
+    }
+    point_gains = {
+        user_id: to_int(branch_rows[user_id].get("total_points", 0)) - to_int(current_rows[user_id].get("total_points", 0))
+        for user_id in shared_ids
+    }
+    biggest_gain = max([value for value in rank_gains.values() if value > 0], default=0)
+    biggest_fall = max([-value for value in rank_gains.values() if value < 0], default=0)
+    biggest_points_gain = max([value for value in point_gains.values() if value > 0], default=0)
+    biggest_climbers = [user_id for user_id, value in rank_gains.items() if value == biggest_gain] if biggest_gain else []
+    biggest_fallers = [user_id for user_id, value in rank_gains.items() if value == -biggest_fall] if biggest_fall else []
+    biggest_point_gainers = (
+        [user_id for user_id, value in point_gains.items() if value == biggest_points_gain]
+        if biggest_points_gain
+        else []
+    )
 
     items = []
+    if takes_first:
+        items.append(f"<strong>Moves into first:</strong> {limited_user_names_html(takes_first, user_names, ordered_ids)}")
     if clinches_first:
         items.append(f"<strong>Clinches first:</strong> {limited_user_names_html(clinches_first, user_names, ordered_ids)}")
     if eliminated_first:
         items.append(
-            f"<strong>Eliminated from first:</strong> {limited_user_names_html(eliminated_first, user_names, ordered_ids)}"
+            f"<strong>Eliminated from first-place contention:</strong> {limited_user_names_html(eliminated_first, user_names, ordered_ids)}"
         )
     if cannot_below_second:
         items.append(
@@ -7091,55 +7220,26 @@ def branch_consequence_items(
         items.append(f"<strong>Guarantees top 3:</strong> {limited_user_names_html(clinches_top, user_names, ordered_ids)}")
     if loses_top:
         items.append(f"<strong>Loses top-3 path:</strong> {limited_user_names_html(loses_top, user_names, ordered_ids)}")
+    if enters_top_five:
+        items.append(f"<strong>Enters top 5:</strong> {limited_user_names_html(enters_top_five, user_names, ordered_ids)}")
+    if drops_from_top_five:
+        items.append(f"<strong>Drops out of top 5:</strong> {limited_user_names_html(drops_from_top_five, user_names, ordered_ids)}")
+    if biggest_climbers:
+        items.append(
+            f"<strong>Highest jumper:</strong> {limited_user_names_html(biggest_climbers, user_names, ordered_ids)} "
+            f"({format_rank_delta(biggest_gain)})"
+        )
+    if biggest_fallers:
+        items.append(
+            f"<strong>Biggest faller:</strong> {limited_user_names_html(biggest_fallers, user_names, ordered_ids)} "
+            f"({format_rank_delta(-biggest_fall)})"
+        )
+    if biggest_point_gainers:
+        items.append(
+            f"<strong>Largest points gain:</strong> {limited_user_names_html(biggest_point_gainers, user_names, ordered_ids)} "
+            f"({format_points_delta(biggest_points_gain)})"
+        )
     return items
-
-
-def projected_top_finishers(
-    branch_stats: dict[str, dict[str, Any]],
-    current_snapshot: pd.DataFrame,
-    limit: int = 3,
-) -> list[dict[str, Any]]:
-    current_rank = {
-        str(row["user_id"]): int(row["rank"])
-        for row in current_snapshot.to_dict("records")
-    }
-    rows = list(branch_stats.values())
-    rows.sort(
-        key=lambda row: (
-            float(row["avg_rank"]),
-            -float(row["first_pct"]),
-            -float(row["top_pct"]),
-            -float(row["avg_points"]),
-            current_rank.get(str(row["user_id"]), 999),
-            str(row["user_name"]),
-        )
-    )
-    return rows[:limit]
-
-
-def projected_top_finishers_table_html(
-    branch_stats: dict[str, dict[str, Any]],
-    current_snapshot: pd.DataFrame,
-) -> str:
-    rows = projected_top_finishers(branch_stats, current_snapshot)
-    if not rows:
-        return '<div class="endgame-empty-note">No branch scenarios available.</div>'
-    body = []
-    for index, row in enumerate(rows, start=1):
-        body.append(
-            "<tr>"
-            f"<td>{index}</td>"
-            f"<td>{html.escape(str(row['user_name']))}</td>"
-            f"<td>{float(row['avg_rank']):.2f}</td>"
-            f"<td>{format_probability(float(row['first_pct']))}</td>"
-            "</tr>"
-        )
-    return (
-        '<table class="endgame-mini-table">'
-        "<thead><tr><th>#</th><th>User</th><th>Avg rank</th><th>First</th></tr></thead>"
-        f"<tbody>{''.join(body)}</tbody>"
-        "</table>"
-    )
 
 
 def outcome_card_html(
@@ -7149,6 +7249,7 @@ def outcome_card_html(
     now_first: dict[str, float],
     branch_first: dict[str, float],
     current_snapshot: pd.DataFrame,
+    branch_snapshot: pd.DataFrame,
     teams: pd.DataFrame,
     user_names: dict[str, str],
     ordered_ids: list[str],
@@ -7158,6 +7259,8 @@ def outcome_card_html(
         branch_stats,
         now_first,
         branch_first,
+        current_snapshot,
+        branch_snapshot,
         user_names,
         ordered_ids,
     )
@@ -7166,13 +7269,13 @@ def outcome_card_html(
         + "".join(f"<li>{item}</li>" for item in consequences)
         + "</ul>"
         if consequences
-        else '<div class="endgame-empty-note">No first-place or top-3 clinch changes from this result alone.</div>'
+        else '<div class="endgame-empty-note">No major leaderboard or contention changes from this result alone.</div>'
     )
     return (
         '<div class="endgame-outcome-card">'
         f"<h4>If {team_badge_html(winner_id, teams)} advances</h4>"
-        '<div class="endgame-card-section-title">Mini top 3</div>'
-        f"{projected_top_finishers_table_html(branch_stats, current_snapshot)}"
+        '<div class="endgame-card-section-title">Top 5 leaderboard</div>'
+        f"{branch_top_leaderboard_table_html(branch_snapshot, current_snapshot)}"
         '<div class="endgame-card-section-title">Pool consequences</div>'
         f"{consequence_html}"
         "</div>"
@@ -7221,16 +7324,25 @@ def render_first_place_odds_swing(
         return
     rows.sort(key=lambda row: (-float(row["_sort_now"]), int(row["_sort_rank"]), str(row["User name"])))
     table = pd.DataFrame(rows).drop(columns=["_sort_now", "_sort_rank"])
-    st.markdown("First-place odds swing:")
-    render_centered_dataframe(table, left_columns={"User name"}, bold_columns={home_column, away_column})
+    st.markdown('<div class="endgame-odds-swing-heading">First-place odds swing</div>', unsafe_allow_html=True)
+    render_centered_dataframe(
+        table,
+        centered_columns={"User name"},
+        bold_columns={home_column, away_column},
+    )
 
 
 def render_next_game_outcome_overview(
     next_match: dict[str, Any],
+    participants: list[dict[str, Any]],
     scenarios: list[dict[str, Any]],
     scenario_rankings: pd.DataFrame,
     current_snapshot: pd.DataFrame,
+    results: pd.DataFrame,
     teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
 ) -> None:
     match_id = str(next_match.get("match_id", ""))
     home_id = clean_text_value(next_match.get("home_team", ""))
@@ -7254,6 +7366,28 @@ def render_next_game_outcome_overview(
     all_stats = rank_stats_by_user(scenario_rankings, all_scenario_ids, top_rank_limit)
     home_stats = rank_stats_by_user(scenario_rankings, home_scenario_ids, top_rank_limit)
     away_stats = rank_stats_by_user(scenario_rankings, away_scenario_ids, top_rank_limit)
+    home_snapshot = leaderboard_snapshot_after_match_winner(
+        participants,
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+        match_id,
+        home_id,
+        home_id,
+    )
+    away_snapshot = leaderboard_snapshot_after_match_winner(
+        participants,
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+        match_id,
+        away_id,
+        home_id,
+    )
     user_names = {
         str(row["user_id"]): str(row["user_name"])
         for row in current_snapshot.to_dict("records")
@@ -7270,6 +7404,7 @@ def render_next_game_outcome_overview(
                 now_first,
                 home_first,
                 current_snapshot,
+                home_snapshot,
                 teams,
                 user_names,
                 ordered_ids,
@@ -7285,6 +7420,7 @@ def render_next_game_outcome_overview(
                 now_first,
                 away_first,
                 current_snapshot,
+                away_snapshot,
                 teams,
                 user_names,
                 ordered_ids,
@@ -7304,6 +7440,7 @@ def render_next_game_outcome_overview(
 
 
 def render_endgame_next_game_overview(
+    participants: list[dict[str, Any]],
     scenarios: list[dict[str, Any]],
     scenario_rankings: pd.DataFrame,
     current_snapshot: pd.DataFrame,
@@ -7311,6 +7448,8 @@ def render_endgame_next_game_overview(
     results: pd.DataFrame,
     teams: pd.DataFrame,
     matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
 ) -> None:
     next_match = next_unresolved_endgame_match(current_state, matches, results)
     next_match_id = str(next_match.get("match_id", "")) if next_match else ""
@@ -7323,7 +7462,18 @@ def render_endgame_next_game_overview(
         return
 
     render_next_endgame_match_header(next_match, teams)
-    render_next_game_outcome_overview(next_match, scenarios, scenario_rankings, current_snapshot, teams)
+    render_next_game_outcome_overview(
+        next_match,
+        participants,
+        scenarios,
+        scenario_rankings,
+        current_snapshot,
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+    )
 
 
 def render_user_winning_scenarios(
@@ -7466,6 +7616,7 @@ def render_endgame_scenarios(
         return
 
     render_endgame_next_game_overview(
+        participants,
         scenarios,
         scenario_rankings,
         current_snapshot,
@@ -7473,6 +7624,8 @@ def render_endgame_scenarios(
         results,
         teams,
         matches,
+        knockout_matchups,
+        third_place_combinations,
     )
 
     st.divider()
