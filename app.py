@@ -973,6 +973,7 @@ def apply_visual_theme() -> None:
             color: var(--pool-primary);
             font-size: 0.84rem;
             font-weight: 800;
+            text-align: center;
             text-transform: uppercase;
             letter-spacing: 0;
         }
@@ -7454,7 +7455,6 @@ def render_endgame_next_game_overview(
     next_match = next_unresolved_endgame_match(current_state, matches, results)
     next_match_id = str(next_match.get("match_id", "")) if next_match else ""
 
-    st.subheader("Quarter-Finals Onward")
     render_endgame_bracket_overview(current_state, matches, results, teams, next_match_id)
 
     if not next_match:
