@@ -6117,6 +6117,30 @@ def scenario_event_label(event: dict[str, Any], teams: pd.DataFrame) -> str:
     return f"{winner} beats {loser} in the {stage_label(stage)}"
 
 
+def scenario_event_group_label(events: list[dict[str, Any]], teams: pd.DataFrame) -> str:
+    if not events:
+        return ""
+    representative = events[0]
+    winner = team_name(str(representative.get("winner", "")), teams)
+    stage = str(representative.get("stage", ""))
+    match_id = str(representative.get("match_id", ""))
+    if match_id == FINAL_MATCH_ID:
+        return f"{winner} wins the World Cup"
+    if match_id == THIRD_PLACE_MATCH_ID:
+        return f"{winner} wins the third-place match"
+
+    loser_ids = sorted(
+        {
+            str(event.get("loser", "")).strip()
+            for event in events
+            if str(event.get("loser", "")).strip()
+        }
+    )
+    if len(loser_ids) == 1:
+        return f"{winner} beats {team_name(loser_ids[0], teams)} in the {stage_label(stage)}"
+    return f"{winner} wins in the {stage_label(stage)}"
+
+
 def scenario_path_text(events: list[dict[str, Any]], teams: pd.DataFrame) -> str:
     ordered_events = sorted(events, key=scenario_event_sort_key)
     return "; ".join(scenario_event_label(event, teams) for event in ordered_events) or "Current standings hold"
@@ -6367,34 +6391,38 @@ def render_user_winning_scenarios(
                 st.write("No remaining outcome combination leaves this participant in first place.")
                 continue
 
-            counts: dict[tuple[str, str], int] = {}
-            labels: dict[tuple[str, str], str] = {}
-            events_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+            events_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
             for scenario in winning:
                 for event in scenario["events"]:
                     key = event_key(event)
-                    counts[key] = counts.get(key, 0) + 1
-                    labels[key] = scenario_event_label(event, teams)
-                    events_by_key.setdefault(key, event)
+                    events_by_key.setdefault(key, []).append(event)
+
+            labels = {
+                key: scenario_event_group_label(events, teams)
+                for key, events in events_by_key.items()
+            }
 
             required_keys = [
                 key
-                for key, count in counts.items()
-                if count == len(winning)
+                for key, events in events_by_key.items()
+                if len(events) == len(winning)
             ]
             if required_keys:
                 st.markdown("Required in every winning path:")
-                for key in sorted(required_keys, key=lambda item: scenario_event_sort_key(events_by_key[item])):
+                for key in sorted(
+                    required_keys,
+                    key=lambda item: scenario_event_sort_key(events_by_key[item][0]),
+                ):
                     st.write(f"- {labels[key]}")
 
             common_rows = [
                 {
                     "Outcome": labels[key],
-                    "Winning paths": count,
-                    "Share of winning paths": f"{100 * count / len(winning):.1f}%",
+                    "Winning paths": len(events),
+                    "Share of winning paths": f"{100 * len(events) / len(winning):.1f}%",
                 }
-                for key, count in counts.items()
-                if count < len(winning)
+                for key, events in events_by_key.items()
+                if len(events) < len(winning)
             ]
             if common_rows:
                 if required_keys:
@@ -6501,13 +6529,13 @@ def render_leaderboard(
     st.header("Leaderboard")
     sections = [
         "Leaderboard",
+        "Endgame Scenarios",
         "Additional Rankings",
         "Per Match Scores",
         "Per User Scores",
         "Timelines",
         "Human vs AI",
         "Prediction Analysis",
-        "Endgame Scenarios",
     ]
     selected_section = st.segmented_control(
         "Leaderboard section",
