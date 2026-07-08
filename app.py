@@ -5125,6 +5125,18 @@ def render_default_leaderboard(
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
 ) -> None:
+    overview_rendered = render_leaderboard_endgame_overview(
+        users,
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+    )
+    if overview_rendered:
+        st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
+        st.subheader("Leaderboard")
+
     checkpoints = leaderboard_checkpoint_options(
         results,
         matches,
@@ -7189,20 +7201,10 @@ def branch_consequence_items(
         user_id: to_int(current_rows[user_id].get("rank", 999)) - to_int(branch_rows[user_id].get("rank", 999))
         for user_id in shared_ids
     }
-    point_gains = {
-        user_id: to_int(branch_rows[user_id].get("total_points", 0)) - to_int(current_rows[user_id].get("total_points", 0))
-        for user_id in shared_ids
-    }
     biggest_gain = max([value for value in rank_gains.values() if value > 0], default=0)
     biggest_fall = max([-value for value in rank_gains.values() if value < 0], default=0)
-    biggest_points_gain = max([value for value in point_gains.values() if value > 0], default=0)
     biggest_climbers = [user_id for user_id, value in rank_gains.items() if value == biggest_gain] if biggest_gain else []
     biggest_fallers = [user_id for user_id, value in rank_gains.items() if value == -biggest_fall] if biggest_fall else []
-    biggest_point_gainers = (
-        [user_id for user_id, value in point_gains.items() if value == biggest_points_gain]
-        if biggest_points_gain
-        else []
-    )
 
     items = []
     if takes_first:
@@ -7234,11 +7236,6 @@ def branch_consequence_items(
         items.append(
             f"<strong>Biggest faller:</strong> {limited_user_names_html(biggest_fallers, user_names, ordered_ids)} "
             f"({format_rank_delta(-biggest_fall)})"
-        )
-    if biggest_point_gainers:
-        items.append(
-            f"<strong>Largest points gain:</strong> {limited_user_names_html(biggest_point_gainers, user_names, ordered_ids)} "
-            f"({format_points_delta(biggest_points_gain)})"
         )
     return items
 
@@ -7562,18 +7559,20 @@ def render_user_winning_scenarios(
             st.dataframe(pd.DataFrame(path_rows), hide_index=True, use_container_width=True)
 
 
-def render_endgame_scenarios(
+def endgame_scenarios_context(
     users: pd.DataFrame,
     results: pd.DataFrame,
     teams: pd.DataFrame,
     matches: pd.DataFrame,
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
-) -> None:
+    show_empty_message: bool = True,
+) -> dict[str, Any] | None:
     participants = leaderboard_participants(users, include_ai=False)
     if not participants:
-        st.info("Endgame scenarios will appear once participants have submitted predictions.")
-        return
+        if show_empty_message:
+            st.info("Endgame scenarios will appear once participants have submitted predictions.")
+        return None
 
     with st.spinner("Calculating remaining outcome combinations..."):
         scenarios, truncated = enumerate_endgame_scenarios(
@@ -7612,23 +7611,81 @@ def render_endgame_scenarios(
         )
 
     if not scenarios or scenario_rankings.empty:
-        st.info("No remaining endgame outcome combinations could be resolved from the current bracket.")
-        return
+        if show_empty_message:
+            st.info("No remaining endgame outcome combinations could be resolved from the current bracket.")
+        return None
+
+    return {
+        "participants": participants,
+        "scenarios": scenarios,
+        "truncated": truncated,
+        "current_snapshot": current_snapshot,
+        "current_state": current_state,
+        "scenario_rankings": scenario_rankings,
+    }
+
+
+def render_leaderboard_endgame_overview(
+    users: pd.DataFrame,
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+) -> bool:
+    context = endgame_scenarios_context(
+        users,
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+        show_empty_message=False,
+    )
+    if context is None:
+        return False
 
     render_endgame_next_game_overview(
-        participants,
-        scenarios,
-        scenario_rankings,
-        current_snapshot,
-        current_state,
+        context["participants"],
+        context["scenarios"],
+        context["scenario_rankings"],
+        context["current_snapshot"],
+        context["current_state"],
         results,
         teams,
         matches,
         knockout_matchups,
         third_place_combinations,
     )
+    return True
 
-    st.divider()
+
+def render_endgame_scenarios(
+    users: pd.DataFrame,
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+) -> None:
+    context = endgame_scenarios_context(
+        users,
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+        show_empty_message=True,
+    )
+    if context is None:
+        return
+
+    participants = context["participants"]
+    scenarios = context["scenarios"]
+    truncated = context["truncated"]
+    current_snapshot = context["current_snapshot"]
+    scenario_rankings = context["scenario_rankings"]
+
     st.subheader("Potential Final Positions")
     render_endgame_position_heatmap(scenario_rankings, current_snapshot)
     scenario_count = len(scenarios)
