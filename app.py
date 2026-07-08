@@ -920,11 +920,45 @@ def apply_visual_theme() -> None:
         }
 
         .endgame-bracket {
+            position: relative;
             display: grid;
             grid-template-columns: repeat(4, minmax(10.5rem, 1fr));
-            gap: 0.85rem;
-            align-items: start;
+            grid-template-rows: auto repeat(8, minmax(2.75rem, auto));
+            column-gap: 2rem;
+            row-gap: 0.45rem;
+            align-items: stretch;
             margin: 0.35rem 0 1.15rem;
+        }
+
+        .endgame-bracket-mobile {
+            display: none;
+            margin: 0.35rem 0 1.15rem;
+        }
+
+        .endgame-bracket-lines {
+            position: absolute;
+            z-index: 1;
+            left: 0;
+            right: 0;
+            top: 2.05rem;
+            bottom: 0;
+            width: 100%;
+            height: calc(100% - 2.05rem);
+            pointer-events: none;
+            overflow: visible;
+        }
+
+        .endgame-bracket-lines path {
+            fill: none;
+            stroke: #b8c6d3;
+            stroke-width: 2.4;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            vector-effect: non-scaling-stroke;
+        }
+
+        .endgame-bracket-lines path.final-line {
+            stroke: color-mix(in srgb, var(--pool-primary) 45%, #b8c6d3);
         }
 
         .endgame-bracket-column {
@@ -932,7 +966,10 @@ def apply_visual_theme() -> None:
         }
 
         .endgame-bracket-title {
-            margin: 0 0 0.4rem;
+            position: relative;
+            z-index: 2;
+            grid-row: 1;
+            margin: 0 0 0.15rem;
             color: var(--pool-primary);
             font-size: 0.84rem;
             font-weight: 800;
@@ -940,13 +977,75 @@ def apply_visual_theme() -> None:
             letter-spacing: 0;
         }
 
+        .endgame-bracket-title.quarter-final {
+            grid-column: 1;
+        }
+
+        .endgame-bracket-title.semi-final {
+            grid-column: 2;
+        }
+
+        .endgame-bracket-title.final {
+            grid-column: 3;
+        }
+
+        .endgame-bracket-title.third-place {
+            grid-column: 4;
+        }
+
         .endgame-bracket-card {
-            margin-bottom: 0.55rem;
+            position: relative;
+            z-index: 2;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            min-height: 6.85rem;
+            margin: 0;
             padding: 0.55rem 0.6rem;
             border: 1px solid var(--pool-border);
             border-radius: 8px;
             background: #ffffff;
             box-shadow: 0 8px 20px color-mix(in srgb, var(--pool-primary) 5%, transparent);
+        }
+
+        .endgame-bracket-card.qf-1 {
+            grid-column: 1;
+            grid-row: 2 / span 2;
+        }
+
+        .endgame-bracket-card.qf-2 {
+            grid-column: 1;
+            grid-row: 4 / span 2;
+        }
+
+        .endgame-bracket-card.qf-3 {
+            grid-column: 1;
+            grid-row: 6 / span 2;
+        }
+
+        .endgame-bracket-card.qf-4 {
+            grid-column: 1;
+            grid-row: 8 / span 2;
+        }
+
+        .endgame-bracket-card.sf-1 {
+            grid-column: 2;
+            grid-row: 3 / span 2;
+        }
+
+        .endgame-bracket-card.sf-2 {
+            grid-column: 2;
+            grid-row: 7 / span 2;
+        }
+
+        .endgame-bracket-card.final-1 {
+            grid-column: 3;
+            grid-row: 5 / span 2;
+        }
+
+        .endgame-bracket-card.third-place-1 {
+            grid-column: 4;
+            grid-row: 7 / span 2;
         }
 
         .endgame-bracket-card.next {
@@ -1122,7 +1221,22 @@ def apply_visual_theme() -> None:
 
         @media (max-width: 900px) {
             .endgame-bracket {
+                display: none;
+            }
+
+            .endgame-bracket-mobile {
+                display: grid;
                 grid-template-columns: repeat(2, minmax(10.5rem, 1fr));
+                gap: 0.85rem;
+                align-items: start;
+            }
+
+            .endgame-bracket-mobile .endgame-bracket-title {
+                margin: 0 0 0.4rem;
+            }
+
+            .endgame-bracket-mobile .endgame-bracket-card {
+                margin-bottom: 0.55rem;
             }
 
             .endgame-next-teams {
@@ -1143,7 +1257,7 @@ def apply_visual_theme() -> None:
         }
 
         @media (max-width: 560px) {
-            .endgame-bracket {
+            .endgame-bracket-mobile {
                 grid-template-columns: 1fr;
             }
         }
@@ -6211,11 +6325,22 @@ def render_prediction_analysis(
 
 ENDGAME_MAX_SCENARIOS = 32768
 ENDGAME_OVERVIEW_STAGES = ["quarter_final", "semi_final", "third_place", "final"]
+ENDGAME_BRACKET_DISPLAY_STAGES = ["quarter_final", "semi_final", "final", "third_place"]
 ENDGAME_BRACKET_STAGE_LABELS = {
     "quarter_final": "Quarter-finals",
     "semi_final": "Semi-finals",
     "third_place": "Third place",
     "final": "Final",
+}
+ENDGAME_BRACKET_SLOT_CLASSES = {
+    ("quarter_final", 0): "qf-1",
+    ("quarter_final", 1): "qf-2",
+    ("quarter_final", 2): "qf-3",
+    ("quarter_final", 3): "qf-4",
+    ("semi_final", 0): "sf-1",
+    ("semi_final", 1): "sf-2",
+    ("final", 0): "final-1",
+    ("third_place", 0): "third-place-1",
 }
 
 
@@ -6698,6 +6823,55 @@ def endgame_bracket_team_html(
     )
 
 
+def endgame_stage_css_class(stage: str) -> str:
+    return str(stage).replace("_", "-")
+
+
+def endgame_bracket_card_html(
+    record: dict[str, Any],
+    score_rows: dict[str, dict[str, Any]],
+    teams: pd.DataFrame,
+    next_match_id: str,
+    slot_class: str = "",
+) -> str:
+    match_id = str(record.get("match_id", ""))
+    score = completed_score(score_rows.get(match_id))
+    winner = clean_text_value(record.get("winner", ""))
+    home_id = clean_text_value(record.get("home_team", ""))
+    away_id = clean_text_value(record.get("away_team", ""))
+    card_classes = ["endgame-bracket-card"]
+    if slot_class:
+        card_classes.append(slot_class)
+    if match_id == next_match_id:
+        card_classes.append("next")
+    if score is not None:
+        card_classes.append("completed")
+    home_goals = score[0] if score is not None else None
+    away_goals = score[1] if score is not None else None
+    meta = match_datetime_label(record) or "&nbsp;"
+    meta_html = html.escape(meta) if meta != "&nbsp;" else meta
+    return (
+        f'<article class="{" ".join(card_classes)}">'
+        f'<div class="endgame-bracket-meta">{meta_html}</div>'
+        f'{endgame_bracket_team_html(home_id or None, teams, home_goals, winner == home_id)}'
+        f'{endgame_bracket_team_html(away_id or None, teams, away_goals, winner == away_id)}'
+        "</article>"
+    )
+
+
+def endgame_bracket_connector_svg() -> str:
+    return (
+        '<svg class="endgame-bracket-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">'
+        '<path d="M 23 12.5 H 25 V 25 H 27" />'
+        '<path d="M 23 37.5 H 25 V 25 H 27" />'
+        '<path d="M 23 62.5 H 25 V 75 H 27" />'
+        '<path d="M 23 87.5 H 25 V 75 H 27" />'
+        '<path class="final-line" d="M 48 25 H 50 V 50 H 52" />'
+        '<path class="final-line" d="M 48 75 H 50 V 50" />'
+        "</svg>"
+    )
+
+
 def render_endgame_bracket_overview(
     current_state: dict[str, Any],
     matches: pd.DataFrame,
@@ -6710,40 +6884,36 @@ def render_endgame_bracket_overview(
         return
 
     score_rows = score_lookup(results)
-    columns = []
-    for stage in ENDGAME_OVERVIEW_STAGES:
+    titles = [
+        (
+            f'<div class="endgame-bracket-title {endgame_stage_css_class(stage)}">'
+            f"{html.escape(ENDGAME_BRACKET_STAGE_LABELS.get(stage, stage_label(stage)))}"
+            "</div>"
+        )
+        for stage in ENDGAME_BRACKET_DISPLAY_STAGES
+    ]
+    desktop_cards = []
+    mobile_columns = []
+    for stage in ENDGAME_BRACKET_DISPLAY_STAGES:
         stage_records = [row for row in records if str(row.get("stage", "")) == stage]
-        cards = []
-        for record in stage_records:
-            match_id = str(record.get("match_id", ""))
-            score = completed_score(score_rows.get(match_id))
-            winner = clean_text_value(record.get("winner", ""))
-            home_id = clean_text_value(record.get("home_team", ""))
-            away_id = clean_text_value(record.get("away_team", ""))
-            card_classes = ["endgame-bracket-card"]
-            if match_id == next_match_id:
-                card_classes.append("next")
-            if score is not None:
-                card_classes.append("completed")
-            home_goals = score[0] if score is not None else None
-            away_goals = score[1] if score is not None else None
-            meta = match_datetime_label(record) or "&nbsp;"
-            cards.append(
-                f'<article class="{" ".join(card_classes)}">'
-                f'<div class="endgame-bracket-meta">{html.escape(meta) if meta != "&nbsp;" else meta}</div>'
-                f'{endgame_bracket_team_html(home_id or None, teams, home_goals, winner == home_id)}'
-                f'{endgame_bracket_team_html(away_id or None, teams, away_goals, winner == away_id)}'
-                "</article>"
-            )
-        stage_body = "".join(cards) if cards else '<div class="endgame-empty-note">No matches</div>'
-        columns.append(
+        stage_cards = []
+        for index, record in enumerate(stage_records):
+            slot_class = ENDGAME_BRACKET_SLOT_CLASSES.get((stage, index), "")
+            desktop_cards.append(endgame_bracket_card_html(record, score_rows, teams, next_match_id, slot_class))
+            stage_cards.append(endgame_bracket_card_html(record, score_rows, teams, next_match_id))
+        stage_body = "".join(stage_cards) if stage_cards else '<div class="endgame-empty-note">No matches</div>'
+        mobile_columns.append(
             '<div class="endgame-bracket-column">'
             f'<div class="endgame-bracket-title">{html.escape(ENDGAME_BRACKET_STAGE_LABELS.get(stage, stage_label(stage)))}</div>'
             f"{stage_body}"
             "</div>"
         )
 
-    st.markdown(f'<div class="endgame-bracket">{"".join(columns)}</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="endgame-bracket">{"".join(titles)}{endgame_bracket_connector_svg()}{"".join(desktop_cards)}</div>'
+        f'<div class="endgame-bracket-mobile">{"".join(mobile_columns)}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_next_endgame_match_header(match: dict[str, Any], teams: pd.DataFrame) -> None:
