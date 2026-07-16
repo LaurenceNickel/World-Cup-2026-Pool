@@ -7271,7 +7271,7 @@ def outcome_card_html(
     )
     return (
         '<div class="endgame-outcome-card">'
-        f"<h4>If {team_badge_html(winner_id, teams)} advances</h4>"
+        f"<h4>If {team_badge_html(winner_id, teams)} wins</h4>"
         '<div class="endgame-card-section-title">Top 5 leaderboard</div>'
         f"{branch_top_leaderboard_table_html(branch_snapshot, current_snapshot)}"
         '<div class="endgame-card-section-title">Pool consequences</div>'
@@ -7299,8 +7299,8 @@ def render_first_place_odds_swing(
     }
     home_name = team_name(home_id, teams)
     away_name = team_name(away_id, teams)
-    home_column = f"If {home_name} advances"
-    away_column = f"If {away_name} advances"
+    home_column = f"If {home_name} wins"
+    away_column = f"If {away_name} wins"
     rows = []
     for user_id, user_name in user_names.items():
         now = now_first.get(user_id, 0.0)
