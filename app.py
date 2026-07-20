@@ -1366,13 +1366,6 @@ def apply_visual_theme() -> None:
             font-weight: 850;
         }
 
-        .final-podium-rank {
-            margin-top: 0.15rem;
-            color: var(--pool-muted);
-            font-size: 0.78rem;
-            font-weight: 700;
-        }
-
         .final-podium-step {
             margin-top: auto;
             display: flex;
@@ -5205,7 +5198,6 @@ def final_result_html(final_result: dict[str, Any], teams: pd.DataFrame) -> str:
 def final_podium_card_html(row: dict[str, Any], visual_place: int, class_name: str) -> str:
     player_name = html.escape(str(row.get("user_name", "")))
     points = to_int(row.get("total_points"))
-    rank = ordinal_label(row.get("rank", visual_place))
     place = ordinal_label(visual_place)
     return (
         f'<article class="final-podium-place {class_name}">'
@@ -5213,7 +5205,6 @@ def final_podium_card_html(row: dict[str, Any], visual_place: int, class_name: s
         f'<div class="final-podium-position">{place}</div>'
         f'<div class="final-podium-player">{player_name}</div>'
         f'<div class="final-podium-points">{points:,} points</div>'
-        f'<div class="final-podium-rank">Final rank {rank}</div>'
         "</div>"
         f'<div class="final-podium-step">{visual_place}</div>'
         "</article>"
