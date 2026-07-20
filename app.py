@@ -1212,6 +1212,200 @@ def apply_visual_theme() -> None:
             font-weight: 600;
         }
 
+        .final-summary {
+            margin: 0.15rem 0 1.35rem;
+        }
+
+        .final-result-feature {
+            padding: 1rem 1.1rem 1.1rem;
+            border: 1px solid var(--pool-border);
+            border-radius: 8px;
+            background: #ffffff;
+            box-shadow: 0 10px 28px color-mix(in srgb, var(--pool-primary) 6%, transparent);
+        }
+
+        .final-result-kicker {
+            margin-bottom: 0.85rem;
+            color: var(--pool-muted);
+            font-size: 0.82rem;
+            font-weight: 850;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 0;
+        }
+
+        .final-result-match {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .final-result-team {
+            display: flex;
+            align-items: center;
+            min-width: 0;
+            gap: 0.65rem;
+            color: #000000;
+            font-size: 1.35rem;
+            font-weight: 850;
+        }
+
+        .final-result-team.away {
+            justify-content: flex-end;
+            text-align: right;
+        }
+
+        .final-result-team.winner {
+            color: #167a3a;
+        }
+
+        .final-result-team .team-badge {
+            gap: 0.55rem;
+        }
+
+        .final-result-team .team-badge img {
+            width: 2.35rem;
+            height: 2.35rem;
+        }
+
+        .final-result-team .team-badge span {
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .final-result-score {
+            display: flex;
+            align-items: baseline;
+            justify-content: center;
+            gap: 0.32rem;
+            color: var(--pool-primary);
+            font-weight: 900;
+            white-space: nowrap;
+        }
+
+        .final-result-score-number {
+            min-width: 2.15rem;
+            font-size: 2.75rem;
+            line-height: 1;
+            text-align: center;
+        }
+
+        .final-result-score-divider {
+            color: var(--pool-muted);
+            font-size: 1.45rem;
+        }
+
+        .final-result-detail {
+            margin-top: 0.85rem;
+            color: var(--pool-muted);
+            font-size: 0.98rem;
+            font-weight: 750;
+            text-align: center;
+        }
+
+        .final-podium-title {
+            margin: 1.25rem 0 0.55rem;
+            color: var(--pool-primary);
+            font-size: 1.05rem;
+            font-weight: 850;
+        }
+
+        .final-podium-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            align-items: end;
+            gap: 0.75rem;
+        }
+
+        .final-podium-place {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            overflow: hidden;
+            border: 1px solid var(--pool-border);
+            border-top-width: 5px;
+            border-radius: 8px 8px 0 0;
+            background: #ffffff;
+            box-shadow: 0 10px 28px color-mix(in srgb, var(--pool-primary) 6%, transparent);
+        }
+
+        .final-podium-place.first {
+            min-height: 13rem;
+            border-top-color: #d99a00;
+        }
+
+        .final-podium-place.second {
+            min-height: 11.35rem;
+            border-top-color: #8a98a8;
+        }
+
+        .final-podium-place.third {
+            min-height: 10.45rem;
+            border-top-color: #b36a2e;
+        }
+
+        .final-podium-profile {
+            padding: 0.9rem 0.85rem 0.8rem;
+            text-align: center;
+        }
+
+        .final-podium-position {
+            color: var(--pool-muted);
+            font-size: 0.78rem;
+            font-weight: 850;
+            text-transform: uppercase;
+            letter-spacing: 0;
+        }
+
+        .final-podium-player {
+            margin-top: 0.25rem;
+            color: #000000;
+            font-size: 1.12rem;
+            font-weight: 900;
+            line-height: 1.18;
+            overflow-wrap: anywhere;
+        }
+
+        .final-podium-points {
+            margin-top: 0.38rem;
+            color: var(--pool-primary);
+            font-size: 0.94rem;
+            font-weight: 850;
+        }
+
+        .final-podium-rank {
+            margin-top: 0.15rem;
+            color: var(--pool-muted);
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+
+        .final-podium-step {
+            margin-top: auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 3.2rem;
+            color: #ffffff;
+            font-size: 1.5rem;
+            font-weight: 900;
+        }
+
+        .final-podium-place.first .final-podium-step {
+            height: 4.45rem;
+            background: #d99a00;
+        }
+
+        .final-podium-place.second .final-podium-step {
+            height: 3.55rem;
+            background: #8a98a8;
+        }
+
+        .final-podium-place.third .final-podium-step {
+            background: #b36a2e;
+        }
+
         .endgame-odds-swing-heading {
             margin: 1.45rem 0 0.45rem;
             color: var(--pool-primary);
@@ -1253,6 +1447,41 @@ def apply_visual_theme() -> None:
                 justify-content: center;
                 text-align: center;
                 font-size: 1.22rem;
+            }
+
+            .final-result-match {
+                grid-template-columns: 1fr;
+                gap: 0.6rem;
+            }
+
+            .final-result-team,
+            .final-result-team.away {
+                justify-content: center;
+                text-align: center;
+                font-size: 1.16rem;
+            }
+
+            .final-podium-grid {
+                grid-template-columns: 1fr;
+                align-items: stretch;
+            }
+
+            .final-podium-place.first,
+            .final-podium-place.second,
+            .final-podium-place.third {
+                min-height: 0;
+            }
+
+            .final-podium-place.first {
+                order: 1;
+            }
+
+            .final-podium-place.second {
+                order: 2;
+            }
+
+            .final-podium-place.third {
+                order: 3;
             }
         }
 
@@ -4890,6 +5119,163 @@ def display_leaderboard_table(snapshot: pd.DataFrame, include_change: bool = Tru
     render_centered_dataframe(display, bold_columns={"Total points"}, row_classes=row_classes)
 
 
+def ordinal_label(value: Any) -> str:
+    number = to_int(value)
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
+def completed_final_result_context(
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+) -> dict[str, Any] | None:
+    result_rows = score_lookup(results)
+    score = completed_score(result_rows.get(FINAL_MATCH_ID))
+    if score is None:
+        return None
+
+    actual_state = derive_tournament_state(
+        teams,
+        matches,
+        results,
+        knockout_matchups,
+        third_place_combinations,
+        use_cards=True,
+        require_confirmed_placements=True,
+    )
+    resolved_matches = actual_state.get("resolved_matches", pd.DataFrame())
+    final_rows = resolved_matches[resolved_matches["match_id"].astype(str).eq(FINAL_MATCH_ID)]
+    if final_rows.empty:
+        return None
+
+    final_row = final_rows.iloc[0].to_dict()
+    home_id = str(final_row.get("home_team", "")).strip()
+    away_id = str(final_row.get("away_team", "")).strip()
+    if not home_id or not away_id:
+        return None
+
+    winner_id = str(final_row.get("winner", "")).strip()
+    result_row = result_rows.get(FINAL_MATCH_ID, {})
+    penalty_winner = str(result_row.get(PENALTY_WINNER_COLUMN, "")).strip()
+    match_rows = matches[matches["match_id"].astype(str).eq(FINAL_MATCH_ID)]
+    match_meta = match_datetime_label(match_rows.iloc[0]) if not match_rows.empty else ""
+    return {
+        "home_id": home_id,
+        "away_id": away_id,
+        "home_goals": score[0],
+        "away_goals": score[1],
+        "winner_id": winner_id,
+        "penalty_winner": penalty_winner,
+        "match_meta": match_meta,
+    }
+
+
+def final_result_html(final_result: dict[str, Any], teams: pd.DataFrame) -> str:
+    home_id = final_result["home_id"]
+    away_id = final_result["away_id"]
+    winner_id = final_result["winner_id"]
+    home_class = "final-result-team winner" if winner_id == home_id else "final-result-team"
+    away_class = "final-result-team away winner" if winner_id == away_id else "final-result-team away"
+    detail_parts = []
+    if winner_id:
+        winner_name = html.escape(team_name(winner_id, teams))
+        detail = f"{winner_name} wins the World Cup"
+        if final_result["home_goals"] == final_result["away_goals"] and final_result["penalty_winner"]:
+            detail = f"{winner_name} wins the World Cup on penalties"
+        detail_parts.append(detail)
+    if final_result["match_meta"]:
+        detail_parts.append(html.escape(final_result["match_meta"]))
+    detail_html = " - ".join(detail_parts)
+
+    return (
+        '<section class="final-result-feature">'
+        '<div class="final-result-kicker">World Cup Final</div>'
+        '<div class="final-result-match">'
+        f'<div class="{home_class}">{team_badge_html(home_id, teams)}</div>'
+        '<div class="final-result-score">'
+        f'<span class="final-result-score-number">{final_result["home_goals"]}</span>'
+        '<span class="final-result-score-divider">-</span>'
+        f'<span class="final-result-score-number">{final_result["away_goals"]}</span>'
+        "</div>"
+        f'<div class="{away_class}">{team_badge_html(away_id, teams)}</div>'
+        "</div>"
+        f'<div class="final-result-detail">{detail_html}</div>'
+        "</section>"
+    )
+
+
+def final_podium_card_html(row: dict[str, Any], visual_place: int, class_name: str) -> str:
+    player_name = html.escape(str(row.get("user_name", "")))
+    points = to_int(row.get("total_points"))
+    rank = ordinal_label(row.get("rank", visual_place))
+    place = ordinal_label(visual_place)
+    return (
+        f'<article class="final-podium-place {class_name}">'
+        '<div class="final-podium-profile">'
+        f'<div class="final-podium-position">{place}</div>'
+        f'<div class="final-podium-player">{player_name}</div>'
+        f'<div class="final-podium-points">{points:,} points</div>'
+        f'<div class="final-podium-rank">Final rank {rank}</div>'
+        "</div>"
+        f'<div class="final-podium-step">{visual_place}</div>'
+        "</article>"
+    )
+
+
+def final_podium_html(snapshot: pd.DataFrame) -> str:
+    if snapshot.empty:
+        return ""
+
+    top_rows = snapshot.head(3).reset_index(drop=True).to_dict("records")
+    rows_by_visual_place = {index + 1: row for index, row in enumerate(top_rows)}
+    podium_order = [(2, "second"), (1, "first"), (3, "third")]
+    cards = [
+        final_podium_card_html(rows_by_visual_place[place], place, class_name)
+        for place, class_name in podium_order
+        if place in rows_by_visual_place
+    ]
+    return (
+        '<div class="final-podium-title">Pool Podium</div>'
+        f'<div class="final-podium-grid">{"".join(cards)}</div>'
+    )
+
+
+def render_completed_tournament_summary(
+    results: pd.DataFrame,
+    teams: pd.DataFrame,
+    matches: pd.DataFrame,
+    knockout_matchups: pd.DataFrame,
+    third_place_combinations: pd.DataFrame,
+    snapshot: pd.DataFrame,
+) -> bool:
+    final_result = completed_final_result_context(
+        results,
+        teams,
+        matches,
+        knockout_matchups,
+        third_place_combinations,
+    )
+    if final_result is None:
+        return False
+
+    st.markdown(
+        (
+            '<div class="final-summary">'
+            f"{final_result_html(final_result, teams)}"
+            f"{final_podium_html(snapshot)}"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+    return True
+
+
 def prediction_score_text(row: dict[str, Any] | pd.Series | None) -> str:
     score = completed_score(row)
     if score is None:
@@ -5148,6 +5534,21 @@ def render_default_leaderboard(
         st.info("The leaderboard will appear once the first match has been played.")
         return
     labels = [checkpoint["label"] for checkpoint in checkpoints]
+    final_checkpoint_index = next(
+        (
+            index
+            for index, checkpoint in enumerate(checkpoints)
+            if str(checkpoint["checkpoint_id"]) == f"match:{FINAL_MATCH_ID}"
+        ),
+        None,
+    )
+    if final_checkpoint_index is not None:
+        final_label = labels[final_checkpoint_index]
+        final_default_key = "leaderboard_final_checkpoint_default"
+        if st.session_state.get(final_default_key) != final_label:
+            st.session_state["leaderboard_after_match"] = final_label
+            st.session_state[final_default_key] = final_label
+    summary_placeholder = st.empty()
     selected_label = st.selectbox(
         "Show leaderboard after",
         labels,
@@ -5189,6 +5590,20 @@ def render_default_leaderboard(
                 third_place_combinations,
             )
         cache_status = write_leaderboard_cache(cache_key, str(checkpoint["checkpoint_id"]), snapshot)
+    if (
+        final_checkpoint_index is not None
+        and selected_checkpoint_id == str(checkpoints[final_checkpoint_index]["checkpoint_id"])
+    ):
+        with summary_placeholder.container():
+            if render_completed_tournament_summary(
+                results,
+                teams,
+                matches,
+                knockout_matchups,
+                third_place_combinations,
+                snapshot,
+            ):
+                st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
     display_leaderboard_table(snapshot, include_change=True)
     if cache_status == "disabled":
         st.warning(
