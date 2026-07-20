@@ -1230,6 +1230,7 @@ def apply_visual_theme() -> None:
             font-size: 0.82rem;
             font-weight: 850;
             text-align: center;
+            text-transform: uppercase;
             letter-spacing: 0;
         }
 
@@ -5252,9 +5253,8 @@ def render_completed_tournament_summary(
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
     snapshot: pd.DataFrame,
-    final_result: dict[str, Any] | None = None,
 ) -> bool:
-    final_result = final_result or completed_final_result_context(
+    final_result = completed_final_result_context(
         results,
         teams,
         matches,
@@ -5511,16 +5511,9 @@ def render_default_leaderboard(
     knockout_matchups: pd.DataFrame,
     third_place_combinations: pd.DataFrame,
 ) -> None:
-    final_result = completed_final_result_context(
-        results,
-        teams,
-        matches,
-        knockout_matchups,
-        third_place_combinations,
-    )
-    tournament_complete = final_result is not None
+    final_score_entered = completed_score(score_lookup(results).get(FINAL_MATCH_ID)) is not None
     overview_rendered = False
-    if not tournament_complete:
+    if not final_score_entered:
         overview_rendered = render_leaderboard_endgame_overview(
             users,
             results,
@@ -5552,29 +5545,27 @@ def render_default_leaderboard(
         ),
         None,
     )
-    if final_checkpoint_index is not None and tournament_complete:
+    if final_checkpoint_index is not None:
         final_label = labels[final_checkpoint_index]
         final_default_key = "leaderboard_final_checkpoint_default"
         if st.session_state.get(final_default_key) != final_label:
             st.session_state["leaderboard_after_match"] = final_label
             st.session_state[final_default_key] = final_label
-        selected_index = final_checkpoint_index
-        selected_checkpoint_id = str(checkpoints[selected_index]["checkpoint_id"])
-    else:
-        selected_label = st.selectbox(
-            "Show leaderboard after",
-            labels,
-            index=len(checkpoints) - 1,
-            key="leaderboard_after_match",
-        )
-        selected_checkpoint_id = {
-            checkpoint["label"]: checkpoint["checkpoint_id"] for checkpoint in checkpoints
-        }[selected_label]
-        selected_index = next(
-            index
-            for index, checkpoint in enumerate(checkpoints)
-            if checkpoint["checkpoint_id"] == selected_checkpoint_id
-        )
+    summary_placeholder = st.empty()
+    selected_label = st.selectbox(
+        "Show leaderboard after",
+        labels,
+        index=len(checkpoints) - 1,
+        key="leaderboard_after_match",
+    )
+    selected_checkpoint_id = {
+        checkpoint["label"]: checkpoint["checkpoint_id"] for checkpoint in checkpoints
+    }[selected_label]
+    selected_index = next(
+        index
+        for index, checkpoint in enumerate(checkpoints)
+        if checkpoint["checkpoint_id"] == selected_checkpoint_id
+    )
     checkpoint = checkpoints[selected_index]
     cache_key = leaderboard_cache_key(
         users,
@@ -5602,18 +5593,21 @@ def render_default_leaderboard(
                 third_place_combinations,
             )
         cache_status = write_leaderboard_cache(cache_key, str(checkpoint["checkpoint_id"]), snapshot)
-    if tournament_complete and final_checkpoint_index is not None:
-        if render_completed_tournament_summary(
-            results,
-            teams,
-            matches,
-            knockout_matchups,
-            third_place_combinations,
-            snapshot,
-            final_result=final_result,
-        ):
-            st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
-            st.subheader("Leaderboard")
+    if (
+        final_checkpoint_index is not None
+        and selected_checkpoint_id == str(checkpoints[final_checkpoint_index]["checkpoint_id"])
+    ):
+        with summary_placeholder.container():
+            if render_completed_tournament_summary(
+                results,
+                teams,
+                matches,
+                knockout_matchups,
+                third_place_combinations,
+                snapshot,
+            ):
+                st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
+                st.subheader("Leaderboard")
     display_leaderboard_table(snapshot, include_change=True)
     if cache_status == "disabled":
         st.warning(
