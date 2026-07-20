@@ -1230,7 +1230,6 @@ def apply_visual_theme() -> None:
             font-size: 0.82rem;
             font-weight: 850;
             text-align: center;
-            text-transform: uppercase;
             letter-spacing: 0;
         }
 
@@ -1302,13 +1301,6 @@ def apply_visual_theme() -> None:
             font-size: 0.98rem;
             font-weight: 750;
             text-align: center;
-        }
-
-        .final-podium-title {
-            margin: 1.25rem 0 0.55rem;
-            color: var(--pool-primary);
-            font-size: 1.05rem;
-            font-weight: 850;
         }
 
         .final-podium-grid {
@@ -5240,10 +5232,7 @@ def final_podium_html(snapshot: pd.DataFrame) -> str:
         for place, class_name in podium_order
         if place in rows_by_visual_place
     ]
-    return (
-        '<div class="final-podium-title">Pool Podium</div>'
-        f'<div class="final-podium-grid">{"".join(cards)}</div>'
-    )
+    return f'<div class="final-podium-grid">{"".join(cards)}</div>'
 
 
 def render_completed_tournament_summary(
@@ -5265,14 +5254,13 @@ def render_completed_tournament_summary(
         return False
 
     st.markdown(
-        (
-            '<div class="final-summary">'
-            f"{final_result_html(final_result, teams)}"
-            f"{final_podium_html(snapshot)}"
-            "</div>"
-        ),
+        f'<div class="final-summary">{final_result_html(final_result, teams)}</div>',
         unsafe_allow_html=True,
     )
+    if not snapshot.empty:
+        st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
+        st.subheader("Pool Podium")
+        st.markdown(final_podium_html(snapshot), unsafe_allow_html=True)
     return True
 
 
